@@ -1463,7 +1463,8 @@ export class EnemyAI {
       };
 
       // ---- 计算初始冲量：基于受击方向 _hurtDir ----
-      // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（向左倒）、π=正后受击（向前倒）
+      // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（应向左倒）、π=正后受击（应向前倒）
+      // 倒地方向 = 子弹飞行方向（攻击者→AI 的延伸方向，AI 沿此方向飞出）
       const hurtDir = this._hurtDir || 0;
       // v3.5 调整：回调冲量（v3.4 的 50-70 太大，倒地过快 0.13s；v3.2 的 20-28 偏慢 0.83s）
       // v3.5 二次调整：28-38 仍偏快（0.34s），再降到 18-26，目标 0.5-0.7s 自然倒地感
@@ -1472,21 +1473,25 @@ export class EnemyAI {
       // rotation.x 通道：正前受击 → 向后倒（rotation.x 变负）；正后受击 → 向前倒（变正）
       const frontBackImpulse = -Math.cos(hurtDir) * impulseStrength;
       // rotation.z 通道：右侧受击 → 向左倒（rotation.z 变正）；左侧受击 → 向右倒（变负）
-      const sideImpulse = -Math.sin(hurtDir) * impulseStrength;
+      // v3.6 修复：原公式 -sin(hurtDir) 符号错误（右侧受击时给出负值，导致 AI 朝攻击者倒）
+      // 正确公式 sin(hurtDir)：右侧受击（π/2）→ +impulse → rotation.z > 0 → 左倒（背离攻击者）
+      const sideImpulse = Math.sin(hurtDir) * impulseStrength;
       this._ragdollAngularVel.x = frontBackImpulse;
       this._ragdollAngularVel.z = sideImpulse;
 
       // v3.5 调整：初始倾角从 0.08 减小到 0.03（让重力矩启动更平缓）
       // 保留小倾角让重力矩立刻生效，但不过早加速
+      // v3.6 修复：z 分量符号同步修正（与 sideImpulse 一致）
       const initialTilt = 0.03;
       this.group.rotation.x = -Math.cos(hurtDir) * initialTilt;
-      this.group.rotation.z = -Math.sin(hurtDir) * initialTilt;
+      this.group.rotation.z = Math.sin(hurtDir) * initialTilt;
 
       // ---- 关节初始冲量（痉挛式松弛）----
       // 头部受击后甩动方向与 group 一致，但更剧烈
+      // v3.6 修复：head.z 符号同步修正
       const headImpulse = impulseStrength * 1.4;
       this._jointAngVel.head.x = -Math.cos(hurtDir) * headImpulse + (Math.random() - 0.5) * 2.0;
-      this._jointAngVel.head.z = -Math.sin(hurtDir) * headImpulse + (Math.random() - 0.5) * 2.0;
+      this._jointAngVel.head.z = Math.sin(hurtDir) * headImpulse + (Math.random() - 0.5) * 2.0;
       this._jointAngVel.neck.x = this._jointAngVel.head.x * 0.5;
       this._jointAngVel.neck.z = this._jointAngVel.head.z * 0.5;
       this._jointAngVel.chest.x = this._jointAngVel.head.x * 0.3;
