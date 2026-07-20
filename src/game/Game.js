@@ -980,12 +980,12 @@ export class Game {
       this._checkRoundEnd();
     } else {
       // 冻结时间 AI 也站着不动
+      // v3 修改：存活 bot 也调用 update(frozen=true)，让动画系统正常工作
+      // - 避免持枪姿态残留（engage 切 idle 后关节值不归零）
+      // - 死亡 bot 继续播放死亡动画
       for (const bot of this.allBots) {
         bot.state = 'idle';
-        // 死亡的 bot 继续播放死亡动画（修复：回合结束后死亡动画应完整播放）
-        if (!bot.isAlive) {
-          bot.update(delta, null, this.allBots);
-        }
+        bot.update(delta, null, this.allBots, true);
       }
     }
 

@@ -1028,7 +1028,7 @@ export class EnemyAI {
    * @param {import('./Player.js').Player} player
    * @param {Array<EnemyAI>} allEnemies
    */
-  update(delta, player, allEnemies) {
+  update(delta, player, allEnemies, frozen = false) {
     if (!this.isAlive) {
       // 多阶段死亡动画
       this._updateDeathAnimation(delta);
@@ -1039,6 +1039,19 @@ export class EnemyAI {
     }
 
     const now = performance.now() / 1000;
+
+    // v3 新增：frozen 模式（freeze/round_end 阶段）
+    // - 跳过状态机、目标检测、物理碰撞
+    // - 仍调用 _updateAnimation，让关节归零（避免持枪姿态残留）
+    // - 仍调用 _updateFacing 和武器更新
+    if (frozen) {
+      this._updateAnimation(delta, now);
+      this._updateFacing(delta);
+      this.weapon.update(now);
+      this._updateMuzzleFlash(now);
+      return;
+    }
+
     this.stateTimer += delta;
 
     // ---- 目标检测与状态切换 ----
@@ -1191,72 +1204,130 @@ export class EnemyAI {
       const swing = Math.sin(this._walkPhase) * swingAmp;
       const swingOpp = Math.sin(this._walkPhase + Math.PI) * swingAmp;
 
-      // 腿摆动（髋关节）
-      this.leftLegGroup.rotation.x = swing;
-      this.rightLegGroup.rotation.x = swingOpp;
-      // 膝关节弯曲（行走时小腿轻微弯曲，奔跑时更明显）
-      const kneeBend = Math.max(0, Math.sin(this._walkPhase + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
-      const kneeBendOpp = Math.max(0, Math.sin(this._walkPhase + Math.PI + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
-      this.leftKneeGroup.rotation.x = kneeBend;
-      this.rightKneeGroup.rotation.x = kneeBendOpp;
+      // v3.3 重写：engage 状态使用专门的"持枪瞄准"姿态
+      // - 不是走路动作，而是稳定的持枪瞄准姿态
+      // - 腿部几乎不摆动（即使 strafe 移动也保持稳定姿态）
+      // - 膝盖保持弯曲（重心降低，持枪姿态）
+      // - 手臂由下方持枪姿态块控制（双手举枪）
+      // - 身体几乎无起伏（保持瞄准稳定）
+      if (this.state === 'engage') {
+        // 腿部：保持稳定姿态，仅有极微小摆动（避免完全僵硬）
+        // 摆动幅度 0.04（原 0.25），几乎看不出走路动作
+        const aimSwingAmp = 0.04;
+        const aimSwing = Math.sin(this._walkPhase) * aimSwingAmp;
+        const aimSwingOpp = Math.sin(this._walkPhase + Math.PI) * aimSwingAmp;
+        this.leftLegGroup.rotation.x = aimSwing;
+        this.rightLegGroup.rotation.x = aimSwingOpp;
+        // 膝盖保持基础弯曲（持枪姿态，重心降低，0.35 弧度≈20°）
+        // 仅有微小变化（避免完全僵硬），变量幅度 0.03（原 0.15）
+        const aimKneeBase = 0.35;
+        const aimKneeVar = Math.max(0, Math.sin(this._walkPhase + Math.PI / 2)) * 0.03;
+        const aimKneeVarOpp = Math.max(0, Math.sin(this._walkPhase + Math.PI + Math.PI / 2)) * 0.03;
+        this.leftKneeGroup.rotation.x = aimKneeBase + aimKneeVar;
+        this.rightKneeGroup.rotation.x = aimKneeBase + aimKneeVarOpp;
+        // 脚踝几乎不动（保持稳定站立姿态）
+        this.leftAnkleGroup.rotation.x = Math.sin(this._walkPhase + Math.PI / 4) * 0.03;
+        this.rightAnkleGroup.rotation.x = Math.sin(this._walkPhase + Math.PI + Math.PI / 4) * 0.03;
+        // 身体几乎无起伏（保持瞄准稳定），重心降低到 0.91（持枪姿态）
+        const aimBounce = Math.abs(Math.sin(this._walkPhase * 2)) * 0.005;
+        this.hipGroup.position.y = 0.91 + aimBounce;  // 0.91 比正常 0.95 低（重心降低，持枪瞄准姿态）
+        this.hipGroup.rotation.z = Math.sin(this._walkPhase) * 0.005;
+        // 注意：手臂不摆动，由下方 engage 姿态块设置持枪姿态
+      } else {
+        // 正常行走/奔跑动画（非 engage 状态）
+        // 腿摆动（髋关节）
+        this.leftLegGroup.rotation.x = swing;
+        this.rightLegGroup.rotation.x = swingOpp;
+        // 膝关节弯曲（行走时小腿轻微弯曲，奔跑时更明显）
+        const kneeBend = Math.max(0, Math.sin(this._walkPhase + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
+        const kneeBendOpp = Math.max(0, Math.sin(this._walkPhase + Math.PI + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
+        this.leftKneeGroup.rotation.x = kneeBend;
+        this.rightKneeGroup.rotation.x = kneeBendOpp;
 
-      // 脚踝关节弯曲（v2 新增）：腿前摆时脚尖上抬（背屈），腿后摆时脚尖下垂（跖屈）
-      const ankleBendL = Math.sin(this._walkPhase + Math.PI / 4) * 0.3;
-      const ankleBendR = Math.sin(this._walkPhase + Math.PI + Math.PI / 4) * 0.3;
-      this.leftAnkleGroup.rotation.x = ankleBendL;
-      this.rightAnkleGroup.rotation.x = ankleBendR;
+        // 脚踝关节弯曲（v2 新增）：腿前摆时脚尖上抬（背屈），腿后摆时脚尖下垂（跖屈）
+        const ankleBendL = Math.sin(this._walkPhase + Math.PI / 4) * 0.3;
+        const ankleBendR = Math.sin(this._walkPhase + Math.PI + Math.PI / 4) * 0.3;
+        this.leftAnkleGroup.rotation.x = ankleBendL;
+        this.rightAnkleGroup.rotation.x = ankleBendR;
 
-      // 手臂反向摆动 + 肘部弯曲（v2 新增）
-      if (this.state !== 'engage' && this.state !== 'reload' && this.state !== 'retreat') {
-        this.leftArmGroup.rotation.x = swingOpp * 0.6;
-        this.rightArmGroup.rotation.x = swing * 0.6;
-        // 肘部基础弯曲：行走 30°，奔跑 80°（自然姿态）
-        const elbowBase = isRunning ? 1.4 : 0.5;
-        // 摆臂时肘部弯曲度跟随摆动相位变化（前摆时更弯）
-        const elbowVarL = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
-        const elbowVarR = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
-        this.leftElbowGroup.rotation.x = elbowBase + elbowVarL;
-        this.rightElbowGroup.rotation.x = elbowBase + elbowVarR;
+        // 手臂反向摆动 + 肘部弯曲（v2 新增）
+        if (this.state !== 'reload' && this.state !== 'retreat') {
+          this.leftArmGroup.rotation.x = swingOpp * 0.6;
+          this.rightArmGroup.rotation.x = swing * 0.6;
+          // 肘部基础弯曲：行走 30°，奔跑 80°（自然姿态）
+          const elbowBase = isRunning ? 1.4 : 0.5;
+          // 摆臂时肘部弯曲度跟随摆动相位变化（前摆时更弯）
+          const elbowVarL = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
+          const elbowVarR = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
+          this.leftElbowGroup.rotation.x = elbowBase + elbowVarL;
+          this.rightElbowGroup.rotation.x = elbowBase + elbowVarR;
+        }
+
+        // 身体上下起伏 + 左右轻微摇晃
+        const bounce = Math.abs(Math.sin(this._walkPhase * 2)) * bodyBounce;
+        this.hipGroup.position.y = 0.95 + bounce;
+        this.hipGroup.rotation.z = Math.sin(this._walkPhase) * 0.02;
       }
-
-      // 身体上下起伏 + 左右轻微摇晃
-      const bounce = Math.abs(Math.sin(this._walkPhase * 2)) * bodyBounce;
-      this.hipGroup.position.y = 0.95 + bounce;
-      this.hipGroup.rotation.z = Math.sin(this._walkPhase) * 0.02;
     } else {
       // 静止：所有关节缓慢回归原位
-      this.leftLegGroup.rotation.x = THREE.MathUtils.lerp(this.leftLegGroup.rotation.x, 0, 0.15);
-      this.rightLegGroup.rotation.x = THREE.MathUtils.lerp(this.rightLegGroup.rotation.x, 0, 0.15);
-      this.leftKneeGroup.rotation.x = THREE.MathUtils.lerp(this.leftKneeGroup.rotation.x, 0, 0.15);
-      this.rightKneeGroup.rotation.x = THREE.MathUtils.lerp(this.rightKneeGroup.rotation.x, 0, 0.15);
-      // 脚踝归位（v2 新增）
-      this.leftAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.leftAnkleGroup.rotation.x, 0, 0.15);
-      this.rightAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.rightAnkleGroup.rotation.x, 0, 0.15);
-      if (this.state !== 'engage' && this.state !== 'reload' && this.state !== 'retreat') {
-        this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, 0, 0.15);
-        this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, 0, 0.15);
-        // 肘部归位到轻微弯曲 0.2（自然下垂姿态，v2 新增）
-        this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, 0.2, 0.15);
-        this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, 0.2, 0.15);
+      // v3.3 修改：engage 静止时保持持枪瞄准姿态（与移动时一致），不归零
+      if (this.state === 'engage') {
+        // 腿几乎不动（保持稳定持枪瞄准姿态）
+        this.leftLegGroup.rotation.x = THREE.MathUtils.lerp(this.leftLegGroup.rotation.x, 0, 0.15);
+        this.rightLegGroup.rotation.x = THREE.MathUtils.lerp(this.rightLegGroup.rotation.x, 0, 0.15);
+        // 膝盖保持基础弯曲（持枪姿态，重心降低，与移动时一致 0.35）
+        this.leftKneeGroup.rotation.x = THREE.MathUtils.lerp(this.leftKneeGroup.rotation.x, 0.35, 0.15);
+        this.rightKneeGroup.rotation.x = THREE.MathUtils.lerp(this.rightKneeGroup.rotation.x, 0.35, 0.15);
+        // 脚踝归位
+        this.leftAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.leftAnkleGroup.rotation.x, 0, 0.15);
+        this.rightAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.rightAnkleGroup.rotation.x, 0, 0.15);
+        // 重心降低（持枪瞄准姿态 0.91，与移动时一致）
+        this.hipGroup.position.y = THREE.MathUtils.lerp(this.hipGroup.position.y, 0.91, 0.2);
+        this.hipGroup.rotation.z = THREE.MathUtils.lerp(this.hipGroup.rotation.z, 0, 0.15);
+        // 注意：手臂不归零，由下方 engage 姿态块设置持枪姿态
+      } else {
+        // 非 engage 状态：所有关节归零
+        this.leftLegGroup.rotation.x = THREE.MathUtils.lerp(this.leftLegGroup.rotation.x, 0, 0.15);
+        this.rightLegGroup.rotation.x = THREE.MathUtils.lerp(this.rightLegGroup.rotation.x, 0, 0.15);
+        this.leftKneeGroup.rotation.x = THREE.MathUtils.lerp(this.leftKneeGroup.rotation.x, 0, 0.15);
+        this.rightKneeGroup.rotation.x = THREE.MathUtils.lerp(this.rightKneeGroup.rotation.x, 0, 0.15);
+        // 脚踝归位（v2 新增）
+        this.leftAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.leftAnkleGroup.rotation.x, 0, 0.15);
+        this.rightAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.rightAnkleGroup.rotation.x, 0, 0.15);
+        if (this.state !== 'reload' && this.state !== 'retreat') {
+          this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, 0, 0.15);
+          this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, 0, 0.15);
+          // 肘部归位到轻微弯曲 0.2（自然下垂姿态，v2 新增）
+          this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, 0.2, 0.15);
+          this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, 0.2, 0.15);
+        }
+        this.hipGroup.position.y = THREE.MathUtils.lerp(this.hipGroup.position.y, 0.95, 0.2);
+        this.hipGroup.rotation.z = THREE.MathUtils.lerp(this.hipGroup.rotation.z, 0, 0.15);
       }
-      this.hipGroup.position.y = THREE.MathUtils.lerp(this.hipGroup.position.y, 0.95, 0.2);
-      this.hipGroup.rotation.z = THREE.MathUtils.lerp(this.hipGroup.rotation.z, 0, 0.15);
     }
 
-    // ---- 交战姿态：双手持枪 + 双肘弯曲 + 颈部前倾瞄准 ----
+    // ---- 交战姿态：双手举枪瞄准（v3.3 强化：双臂都前伸举枪，肘部弯曲更深）----
     if (this.state === 'engage') {
-      // 左臂抬起扶枪（向前伸）
-      this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, -1.1, 0.2);
-      this.leftArmGroup.rotation.z = THREE.MathUtils.lerp(this.leftArmGroup.rotation.z, 0.3, 0.2);
-      // 左肘弯曲：前臂指向枪身（v2 新增）
-      this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, -1.2, 0.2);
-      // 右臂自然下垂持枪
-      this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, -0.3, 0.2);
-      // 右肘弯曲：前臂指向握把（v2 新增）
-      this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, -0.6, 0.2);
-      // 颈部微前倾（瞄准姿态，v2 新增）
-      this.neckGroup.rotation.x = THREE.MathUtils.lerp(this.neckGroup.rotation.x, -0.08, 0.1);
-      this.headGroup.rotation.x = THREE.MathUtils.lerp(this.headGroup.rotation.x, 0, 0.1);
+      // v3.3 强化：左臂大幅抬起向前伸（扶枪护木），肩膀前倾
+      // rotation.x = -1.4（约 -80°，手臂前伸接近水平）
+      // rotation.z = 0.4（左臂向内收，扶枪身）
+      this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, -1.4, 0.2);
+      this.leftArmGroup.rotation.z = THREE.MathUtils.lerp(this.leftArmGroup.rotation.z, 0.4, 0.2);
+      // 左肘弯曲加深：前臂指向枪身护木（-1.5 ≈ -86°）
+      this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, -1.5, 0.2);
+      // v3.3 强化：右臂也抬起举枪（不再下垂），肩膀前伸
+      // rotation.x = -1.1（约 -63°，手臂抬起持枪握把）
+      // rotation.z = -0.3（右臂向内收，持枪握把）
+      this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, -1.1, 0.2);
+      this.rightArmGroup.rotation.z = THREE.MathUtils.lerp(this.rightArmGroup.rotation.z, -0.3, 0.2);
+      // 右肘弯曲：前臂指向握把（-1.0 ≈ -57°）
+      this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, -1.0, 0.2);
+      // v3.3 强化：颈部前倾瞄准（-0.2 ≈ -11°，头部前倾瞄准）
+      this.neckGroup.rotation.x = THREE.MathUtils.lerp(this.neckGroup.rotation.x, -0.2, 0.1);
+      // 头部微抬（瞄准姿态，眼睛平视目标）
+      this.headGroup.rotation.x = THREE.MathUtils.lerp(this.headGroup.rotation.x, 0.05, 0.1);
+      // v3.3 强化：胸腔前倾（整体瞄准姿态，-0.08 ≈ -5°）
+      this.chestGroup.rotation.x = THREE.MathUtils.lerp(this.chestGroup.rotation.x, -0.08, 0.1);
     } else if (this.state === 'reload' || this.state === 'retreat') {
       // 换弹/撤退：双手下沉到胸前
       this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, -0.5, 0.15);
@@ -1394,8 +1465,8 @@ export class EnemyAI {
       // ---- 计算初始冲量：基于受击方向 _hurtDir ----
       // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（向左倒）、π=正后受击（向前倒）
       const hurtDir = this._hurtDir || 0;
-      // v3.1 调整：增大初始冲量，让击杀反作用力更明显（4-6.5 → 9-13 弧度/秒）
-      const impulseStrength = 9.0 + Math.random() * 4.0;
+      // v3.4 调整：再次增大初始冲量（32-44 → 50-70 弧度/秒）
+      const impulseStrength = 50.0 + Math.random() * 20.0;
 
       // rotation.x 通道：正前受击 → 向后倒（rotation.x 变负）；正后受击 → 向前倒（变正）
       const frontBackImpulse = -Math.cos(hurtDir) * impulseStrength;
@@ -1403,6 +1474,12 @@ export class EnemyAI {
       const sideImpulse = -Math.sin(hurtDir) * impulseStrength;
       this._ragdollAngularVel.x = frontBackImpulse;
       this._ragdollAngularVel.z = sideImpulse;
+
+      // v3.4 新增：给 group 一个初始倾角（朝倒地方向），让重力矩立刻生效
+      // 避免初始直立状态时重力矩 sin(0)=0 无法加速倒地
+      const initialTilt = 0.2;
+      this.group.rotation.x = -Math.cos(hurtDir) * initialTilt;
+      this.group.rotation.z = -Math.sin(hurtDir) * initialTilt;
 
       // ---- 关节初始冲量（痉挛式松弛）----
       // 头部受击后甩动方向与 group 一致，但更剧烈
@@ -1433,12 +1510,12 @@ export class EnemyAI {
     const elapsed = this._deathElapsed;
 
     // ---- 物理参数 ----
-    // v3.1 调整：增大重力 + 降低阻尼，让倒地更快更有冲量感
-    const GRAVITY = 22.0;              // 重力加速度（12 → 22，倒地更快）
-    const ANGULAR_DAMP = 0.86;         // group 角速度阻尼（0.92 → 0.86，冲量衰减更慢）
-    const JOINT_DAMP = 0.82;           // 关节角速度阻尼（0.88 → 0.82，关节更松散）
-    const MAX_TILT = Math.PI / 2 - 0.05;  // 最大倾角（接近 π/2 时触地）
-    const SETTLE_THRESHOLD = 0.05;     // 角速度低于此值视为稳定
+    // v3.4 调整：阻尼从 0.72 提高到 0.88，让冲量保持更久（倒地更快）
+    const GRAVITY = 65.0;              // 重力加速度（保持 v3.3 的 65）
+    const ANGULAR_DAMP = 0.88;         // group 角速度阻尼（0.72 → 0.88，冲量保持更久）
+    const JOINT_DAMP = 0.82;           // 关节角速度阻尼（0.68 → 0.82，关节冲量保持更久）
+    const MAX_TILT = Math.PI / 2 - 0.02;  // 最大倾角（接近 π/2 时触地），放宽阈值让触地更早
+    const SETTLE_THRESHOLD = 0.08;     // 角速度低于此值视为稳定
 
     // ---- 1. 整体倒地物理（group 旋转）----
     if (!this._ragdollSettled) {
@@ -1465,26 +1542,35 @@ export class EnemyAI {
       this.group.rotation.z += this._ragdollAngularVel.z * delta;
 
       // 重心下降（倾倒过程中 group.position.y 降低，模拟重心降低）
-      // v3.1 调整：lerp 系数 0.1 → 0.25，重心下降更快（下落感更真实）
+      // v3.3 调整：lerp 系数 0.5 → 0.85，重心下降极快（下落感更真实）
+      // v3.4 调整：移到 settled 检查之外，确保 settled 后 posY 继续降到 0
       const targetY = Math.max(0, 0.5 * (1 - tiltMag / MAX_TILT));
-      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, targetY, 0.25);
+      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, targetY, 0.85);
 
-      // 地面碰撞检测：倾角超过 MAX_TILT 时停止并轻微反弹
-      // v3.1 调整：反弹系数 0.3 → 0.12（冲量增大后避免回弹过多）
+      // 地面碰撞检测：倾角超过 MAX_TILT 时停止并清零角速度
+      // v3.4 调整：触地后直接清零 angularVel（不再反弹），让 settled 快速触发
       if (Math.abs(this.group.rotation.x) >= MAX_TILT) {
         this.group.rotation.x = Math.sign(this.group.rotation.x) * MAX_TILT;
-        this._ragdollAngularVel.x = -this._ragdollAngularVel.x * 0.12;
+        this._ragdollAngularVel.x = 0;  // 触地清零，避免持续震荡
       }
       if (Math.abs(this.group.rotation.z) >= MAX_TILT) {
         this.group.rotation.z = Math.sign(this.group.rotation.z) * MAX_TILT;
-        this._ragdollAngularVel.z = -this._ragdollAngularVel.z * 0.12;
+        this._ragdollAngularVel.z = 0;  // 触地清零，避免持续震荡
       }
 
-      // 检查是否稳定（角速度很小且已触地）
-      const angVelMag = this._ragdollAngularVel.length();
-      if (angVelMag < SETTLE_THRESHOLD && tiltMag >= MAX_TILT - 0.1) {
+      // 检查是否稳定：触地后（tilt 接近 MAX_TILT）立即 settled
+      // v3.4 调整：放宽条件，触地即 settled（不再要求 angVelMag < 0.08）
+      const tiltMagNow = Math.sqrt(this.group.rotation.x ** 2 + this.group.rotation.z ** 2);
+      if (tiltMagNow >= MAX_TILT - 0.1) {
         this._ragdollSettled = true;
+        this._ragdollAngularVel.set(0, 0, 0);
       }
+    }
+
+    // v3.4 新增：settled 后继续下降 posY 到 0（避免悬空）
+    // settled=true 时上面的 if 块跳过，但 posY 可能还没降到 0
+    if (this._ragdollSettled && this.group.position.y > 0.001) {
+      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, 0, 0.5);
     }
 
     // ---- 2. 关节物理（独立 ragdoll 摆动）----
