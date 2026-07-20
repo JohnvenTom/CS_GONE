@@ -1,0 +1,1284 @@
+/* ============================================================
+ * CS:GONE - 赛博战术视觉语言样式
+ * 主色：深空灰 / 碳纤维黑 / CT科技蓝 / T炽焰橙 / 警示霓虹红
+ * 字体：Orbitron (数字) / Rajdhani (文字) / Monospace (弹药/血量)
+ * 特性：毛玻璃 backdrop-filter + 弹簧式 cubic-bezier(0.16,1,0.3,1)
+ * ============================================================ */
+
+:root {
+  --bg-deep: #0B0C10;
+  --bg-carbon: #1A1A1F;
+  --bg-glass: rgba(20, 22, 28, 0.55);
+  --border-glow: rgba(255, 255, 255, 0.08);
+
+  --ct-primary: #00D4FF;
+  --ct-secondary: #80F0FF;
+  --ct-glow: rgba(0, 212, 255, 0.6);
+
+  --t-primary: #FF5500;
+  --t-secondary: #FFAA00;
+  --t-glow: rgba(255, 85, 0, 0.6);
+
+  --danger: #FF2040;
+  --warn: #FFAA00;
+  --success: #00FF88;
+
+  --text-primary: #FFFFFF;
+  --text-muted: #8A8F9A;
+  --text-dim: #5A5F6A;
+
+  --easing-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --easing-snap: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --blur-strong: 20px;
+  --blur-soft: 10px;
+  --blur-low: 5px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: 'Rajdhani', 'Microsoft YaHei', sans-serif;
+  font-weight: 500;
+  cursor: default;
+}
+
+#game-container {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+}
+
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ============ 准星 ============ */
+#crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 40px;
+  height: 40px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 50;
+  transition: opacity 0.2s var(--easing-spring);
+}
+
+#crosshair.inspecting {
+  opacity: 0.25;
+}
+
+#crosshair.inspecting .ch-line,
+#crosshair.inspecting .ch-dot {
+  background: #888 !important;
+  width: 2px !important;
+  height: 2px !important;
+  box-shadow: none !important;
+}
+
+.ch-line {
+  position: absolute;
+  background: var(--ct-primary);
+  box-shadow: 0 0 4px var(--ct-glow);
+  transition: all 0.08s var(--easing-snap);
+}
+
+.ch-top, .ch-bottom {
+  left: 50%;
+  width: 2px;
+  height: 8px;
+  transform: translateX(-50%);
+}
+.ch-top { top: 4px; }
+.ch-bottom { bottom: 4px; }
+
+.ch-left, .ch-right {
+  top: 50%;
+  width: 8px;
+  height: 2px;
+  transform: translateY(-50%);
+}
+.ch-left { left: 4px; }
+.ch-right { right: 4px; }
+
+.ch-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 2px;
+  background: var(--ct-primary);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+#crosshair.moving .ch-line {
+  background: var(--t-primary);
+  box-shadow: 0 0 4px var(--t-glow);
+}
+#crosshair.moving .ch-top { top: 0; height: 12px; }
+#crosshair.moving .ch-bottom { bottom: 0; height: 12px; }
+#crosshair.moving .ch-left { left: 0; width: 12px; }
+#crosshair.moving .ch-right { right: 0; width: 12px; }
+
+#crosshair.firing .ch-top {
+  top: -6px;
+  height: 14px;
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
+
+#hit-marker {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%) scale(0);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 51;
+  transition: opacity 0.1s;
+}
+
+#hit-marker.show {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
+}
+
+#hit-marker::before,
+#hit-marker::after {
+  content: '';
+  position: absolute;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(255,255,255,0.9);
+}
+#hit-marker::before {
+  top: 50%; left: 0; right: 0;
+  height: 2px;
+  transform: translateY(-50%) rotate(45deg);
+}
+#hit-marker::after {
+  left: 50%; top: 0; bottom: 0;
+  width: 2px;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+#hit-marker.headshot::before,
+#hit-marker.headshot::after {
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
+}
+
+/* ============ 顶部中央比分板 ============ */
+#top-scoreboard {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 8px;
+  padding: 6px 4px;
+  z-index: 40;
+  font-family: 'Orbitron', monospace;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+}
+
+.score-team {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 24px;
+  min-width: 90px;
+}
+.score-team.ct .score-value { color: var(--ct-primary); text-shadow: 0 0 8px var(--ct-glow); }
+.score-team.t .score-value { color: var(--t-primary); text-shadow: 0 0 8px var(--t-glow); }
+.score-value {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+}
+.score-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  margin-top: 2px;
+}
+
+.score-divider {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 18px;
+  border-left: 1px solid var(--border-glow);
+  border-right: 1px solid var(--border-glow);
+}
+.round-info {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.round-timer {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--warn);
+}
+.round-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  letter-spacing: 1px;
+}
+
+/* ============ 经济条 ============ */
+.economy-bar {
+  position: fixed;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  padding: 6px 14px;
+  z-index: 39;
+  font-family: 'Orbitron', monospace;
+}
+#economy-ct { left: 16px; border-left: 2px solid var(--ct-primary); }
+#economy-t { right: 16px; border-right: 2px solid var(--t-primary); }
+.eco-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+.eco-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--success);
+}
+
+/* ============ HUD 角落面板 ============ */
+.hud-corner {
+  position: fixed;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 10px;
+  z-index: 40;
+}
+
+#hp-armor-panel {
+  bottom: 16px;
+  left: 16px;
+  padding: 8px;
+  width: 120px;
+  height: 120px;
+}
+#hp-armor-panel.low-hp {
+  animation: heartbeat 0.8s infinite;
+}
+@keyframes heartbeat {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 32, 64, 0); }
+  50% { box-shadow: 0 0 24px 4px rgba(255, 32, 64, 0.6); }
+}
+
+.vitals-ring {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+.ring-svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.ring-bg { fill: none; stroke: rgba(255,255,255,0.06); stroke-width: 4; }
+.ring-hp {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 4;
+  stroke-dasharray: 264;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 0.3s var(--easing-spring), stroke 0.2s;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+.ring-hp.medium { stroke: var(--warn); }
+.ring-hp.low { stroke: var(--danger); }
+.ring-armor {
+  fill: none;
+  stroke: var(--ct-primary);
+  stroke-width: 3;
+  stroke-dasharray: 214;
+  stroke-dashoffset: 214;
+  transition: stroke-dashoffset 0.3s var(--easing-spring);
+  filter: drop-shadow(0 0 3px var(--ct-glow));
+}
+
+.vitals-values {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.hp-value {
+  font-family: 'Orbitron', monospace;
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1;
+}
+.armor-value {
+  font-family: 'Orbitron', monospace;
+  font-size: 12px;
+  color: var(--ct-secondary);
+  margin-top: 2px;
+}
+
+/* ============ 弹药面板 ============ */
+#ammo-panel {
+  bottom: 16px;
+  right: 16px;
+  padding: 10px 16px;
+  min-width: 160px;
+  text-align: right;
+}
+.ammo-weapon {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+.ammo-count {
+  font-family: 'Orbitron', monospace;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.ammo-mag {
+  font-size: 38px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1;
+}
+.ammo-sep {
+  font-size: 18px;
+  color: var(--text-dim);
+}
+.ammo-reserve {
+  font-size: 18px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ammo-reload-bar {
+  height: 2px;
+  background: rgba(255,255,255,0.1);
+  margin-top: 8px;
+  border-radius: 1px;
+  overflow: hidden;
+  width: 0;
+  transition: width 0.05s linear;
+}
+.ammo-reload-bar.active {
+  width: 100%;
+  background: linear-gradient(90deg, var(--ct-primary), var(--ct-secondary));
+}
+
+/* ============ 武器栏 ============ */
+#weapon-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  z-index: 40;
+}
+.weapon-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 8px;
+  padding: 6px 14px;
+  min-width: 70px;
+  transition: all 0.25s var(--easing-spring);
+}
+.weapon-slot.active {
+  border-color: var(--ct-primary);
+  transform: translateY(-6px);
+  box-shadow: 0 0 16px var(--ct-glow);
+}
+.weapon-slot.active.t-side {
+  border-color: var(--t-primary);
+  box-shadow: 0 0 16px var(--t-glow);
+}
+.slot-key {
+  font-family: 'Orbitron', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.slot-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+
+/* ============ 击杀反馈 ============ */
+#kill-feed {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 41;
+  pointer-events: none;
+}
+.kf-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-soft));
+  -webkit-backdrop-filter: blur(var(--blur-soft));
+  border: 1px solid var(--border-glow);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  animation: kf-slide 0.3s var(--easing-spring);
+}
+@keyframes kf-slide {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.kf-killer.ct { color: var(--ct-primary); }
+.kf-killer.t { color: var(--t-primary); }
+.kf-victim.ct { color: var(--ct-secondary); opacity: 0.7; }
+.kf-victim.t { color: var(--t-secondary); opacity: 0.7; }
+.kf-weapon { color: var(--text-muted); font-size: 12px; }
+.kf-headshot { color: var(--warn); }
+
+#kill-reward {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) translateY(40px);
+  font-family: 'Orbitron', monospace;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--success);
+  text-shadow: 0 0 12px var(--success);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 42;
+  transition: opacity 0.3s, transform 0.3s var(--easing-spring);
+}
+#kill-reward.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) translateY(20px);
+}
+
+#headshot-banner {
+  position: fixed;
+  top: 30%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.5);
+  font-family: 'Orbitron', monospace;
+  font-size: 36px;
+  font-weight: 800;
+  color: var(--warn);
+  text-shadow: 0 0 20px var(--warn), 0 0 40px var(--warn);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 42;
+  letter-spacing: 4px;
+  transition: opacity 0.2s, transform 0.4s var(--easing-spring);
+}
+#headshot-banner.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* ============ 伤害指示器 ============ */
+#damage-indicators {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 43;
+}
+.dmg-indicator {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 220px;
+  height: 220px;
+  margin: -110px 0 0 -110px;
+  background: radial-gradient(circle at center, rgba(255,32,64,0) 30%, rgba(255,32,64,0.6) 80%, rgba(255,32,64,0) 100%);
+  opacity: 0;
+  animation: dmg-fade 0.8s ease-out forwards;
+}
+@keyframes dmg-fade {
+  0% { opacity: 0.8; transform: rotate(var(--angle)) scale(1); }
+  100% { opacity: 0; transform: rotate(var(--angle)) scale(1.4); }
+}
+
+#damage-vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 44;
+  background: radial-gradient(ellipse at center, rgba(255,32,64,0) 50%, rgba(255,32,64,0.7) 100%);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+#damage-vignette.active { opacity: 1; }
+#damage-vignette.critical {
+  opacity: 0.4;
+  animation: critical-pulse 1s infinite;
+}
+@keyframes critical-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+/* ============ 浮动伤害数字 ============ */
+#floating-damages {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 45;
+}
+.fd-number {
+  position: absolute;
+  font-family: 'Orbitron', monospace;
+  font-size: 22px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+  animation: fd-float 1s ease-out forwards;
+}
+.fd-number.headshot {
+  color: var(--danger);
+  font-size: 28px;
+  text-shadow: 0 0 8px var(--danger), 0 2px 6px rgba(0,0,0,0.9);
+}
+@keyframes fd-float {
+  0% { opacity: 0; transform: translateY(0) scale(0.5); }
+  20% { opacity: 1; transform: translateY(-10px) scale(1.2); }
+  100% { opacity: 0; transform: translateY(-60px) scale(1); }
+}
+
+/* ============ 购买转轮 ============ */
+#buy-wheel-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 60;
+  opacity: 0;
+  transition: opacity 0.25s var(--easing-spring);
+}
+#buy-wheel-canvas.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#buy-wheel-info {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  z-index: 61;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+#buy-wheel-info.active { opacity: 1; }
+.bw-money {
+  font-family: 'Orbitron', monospace;
+  font-size: 38px;
+  font-weight: 800;
+  color: var(--success);
+  text-shadow: 0 0 16px rgba(0,255,136,0.6);
+}
+.bw-money.insufficient {
+  color: var(--danger);
+  text-shadow: 0 0 16px var(--danger);
+  animation: shake 0.4s;
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+.bw-name {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 2px;
+  margin-top: 6px;
+}
+.bw-stats {
+  font-family: 'Orbitron', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.buy-hint {
+  position: fixed;
+  bottom: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-soft));
+  -webkit-backdrop-filter: blur(var(--blur-soft));
+  border: 1px solid var(--border-glow);
+  border-radius: 4px;
+  padding: 6px 16px;
+  z-index: 61;
+  opacity: 0;
+  transition: opacity 0.2s;
+  letter-spacing: 1px;
+}
+.buy-hint.active { opacity: 1; }
+
+/* ============ 计分板 ============ */
+#scoreboard {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) translateY(-100vh);
+  width: 720px;
+  max-width: 92vw;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 70;
+  opacity: 0;
+  transition: transform 0.4s var(--easing-spring), opacity 0.3s;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+}
+#scoreboard.active {
+  transform: translate(-50%, -50%);
+  opacity: 1;
+}
+.sb-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-glow);
+  font-family: 'Orbitron', monospace;
+  font-size: 20px;
+  font-weight: 800;
+}
+.sb-team.ct { color: var(--ct-primary); }
+.sb-team.t { color: var(--t-primary); }
+.sb-vs {
+  color: var(--text-muted);
+  font-size: 14px;
+  animation: blink 1.5s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.sb-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+.sb-column {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sb-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 36px 36px 36px 60px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 4px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+.sb-row.local { background: rgba(255, 170, 0, 0.15); border: 1px solid var(--t-secondary); }
+.sb-row.dead { opacity: 0.4; }
+.sb-rank { color: var(--warn); font-weight: 700; text-align: center; }
+.sb-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-stat { font-family: 'Orbitron', monospace; font-size: 12px; text-align: center; color: var(--text-muted); }
+.sb-money { font-family: 'Orbitron', monospace; font-size: 12px; color: var(--success); text-align: right; }
+.sb-alive-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  margin-right: 6px;
+  box-shadow: 0 0 6px var(--success);
+}
+.sb-alive-dot.dead { background: var(--text-dim); box-shadow: none; }
+.sb-footer {
+  text-align: center;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+/* ============ 回合结算面板 ============ */
+#round-end-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.8);
+  width: 560px;
+  max-width: 92vw;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 65;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.4s var(--easing-spring), opacity 0.3s;
+  text-align: center;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+}
+#round-end-panel.active {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+.rep-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 32px;
+  font-weight: 800;
+  margin-bottom: 12px;
+}
+.rep-title.ct-win { color: var(--ct-primary); text-shadow: 0 0 16px var(--ct-glow); }
+.rep-title.t-win { color: var(--t-primary); text-shadow: 0 0 16px var(--t-glow); }
+/* 半场换边通知（默认隐藏，仅在半场时显示） */
+.rep-halftime {
+  display: none;
+  font-family: 'Orbitron', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--warn);
+  background: linear-gradient(90deg, rgba(255,170,0,0.15), rgba(255,85,0,0.15));
+  border: 1px solid rgba(255,170,0,0.5);
+  border-radius: 6px;
+  padding: 8px 16px;
+  margin-bottom: 12px;
+  text-shadow: 0 0 12px rgba(255,170,0,0.6);
+  animation: halftime-pulse 1.2s ease-in-out infinite;
+}
+.rep-halftime.show { display: block; }
+@keyframes halftime-pulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(255,170,0,0.3); }
+  50% { box-shadow: 0 0 24px rgba(255,170,0,0.7); }
+}
+.rep-mvp {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 18px;
+  color: var(--warn);
+  margin-bottom: 16px;
+}
+.rep-stats {
+  font-family: 'Orbitron', monospace;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+.rep-continue {
+  position: relative;
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 8px 12px;
+  overflow: hidden;
+}
+.rep-progress {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--ct-primary), var(--ct-secondary));
+  opacity: 0.3;
+  transition: width 0.1s linear;
+}
+.rep-continue-text {
+  position: relative;
+  font-family: 'Orbitron', monospace;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+/* ============ 炸弹状态 ============ */
+#bomb-status {
+  position: fixed;
+  bottom: 140px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 2px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 24px;
+  z-index: 50;
+  opacity: 0;
+  transition: opacity 0.2s;
+  box-shadow: 0 0 24px rgba(255,32,64,0.6);
+}
+#bomb-status.active { opacity: 1; }
+#bomb-status.critical { animation: bomb-pulse 0.5s infinite; }
+@keyframes bomb-pulse {
+  0%, 100% { box-shadow: 0 0 24px rgba(255,32,64,0.6); }
+  50% { box-shadow: 0 0 48px rgba(255,32,64,1); transform: translateX(-50%) scale(1.05); }
+}
+.bomb-icon {
+  font-family: 'Orbitron', monospace;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--danger);
+  letter-spacing: 3px;
+}
+.bomb-timer {
+  font-family: 'Orbitron', monospace;
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--danger);
+  text-shadow: 0 0 12px var(--danger);
+}
+.bomb-state {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+/* ============ 购买提示 ============ */
+#purchase-toast {
+  position: fixed;
+  top: 80px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 55;
+  pointer-events: none;
+}
+.pt-item {
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-soft));
+  -webkit-backdrop-filter: blur(var(--blur-soft));
+  border: 1px solid var(--success);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--success);
+  animation: pt-slide 0.3s var(--easing-spring), pt-fade 2.5s forwards;
+}
+@keyframes pt-slide {
+  from { transform: translateX(-40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes pt-fade {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+
+/* ============ 主菜单 ============ */
+#main-menu {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition: opacity 0.6s var(--easing-spring);
+}
+#main-menu.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.mm-bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(0, 212, 255, 0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 70% 80%, rgba(255, 85, 0, 0.15) 0%, transparent 50%),
+    linear-gradient(135deg, var(--bg-deep) 0%, var(--bg-carbon) 100%);
+}
+.mm-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
+}
+.mm-content {
+  position: relative;
+  text-align: center;
+  max-width: 720px;
+  padding: 0 24px;
+  z-index: 1;
+}
+.mm-title {
+  font-family: 'Orbitron', monospace;
+  font-size: clamp(60px, 12vw, 120px);
+  font-weight: 800;
+  letter-spacing: 4px;
+  background: linear-gradient(135deg, var(--ct-primary) 0%, var(--text-primary) 50%, var(--t-primary) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 24px rgba(0,212,255,0.4));
+}
+.mm-accent {
+  -webkit-text-fill-color: var(--warn);
+}
+.mm-subtitle {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 16px;
+  color: var(--text-muted);
+  letter-spacing: 6px;
+  margin-top: -8px;
+  margin-bottom: 48px;
+}
+.mm-modes {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.mm-btn {
+  flex: 1;
+  min-width: 180px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 1px solid var(--border-glow);
+  border-radius: 8px;
+  padding: 16px 20px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.25s var(--easing-spring);
+  font-family: 'Rajdhani', sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+.mm-btn:hover {
+  transform: translateY(-4px);
+  border-color: var(--ct-primary);
+  box-shadow: 0 8px 24px var(--ct-glow);
+}
+.mm-btn.primary {
+  border-color: var(--ct-primary);
+  background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(0,212,255,0.05));
+}
+.mm-btn-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+.mm-btn-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+.mm-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 24px;
+}
+.mm-control-row {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.mm-control-row kbd {
+  display: inline-block;
+  padding: 2px 8px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--border-glow);
+  border-radius: 4px;
+  font-family: 'Orbitron', monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  margin: 0 2px;
+}
+.mm-footer {
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+/* ============ 加载屏 ============ */
+#loading-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-deep);
+  z-index: 200;
+  transition: opacity 0.5s;
+}
+#loading-screen.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.ls-spinner {
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--border-glow);
+  border-top-color: var(--ct-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 16px;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.ls-text {
+  font-family: 'Orbitron', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+}
+
+/* ============ 暂停提示 ============ */
+#pause-hint {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  z-index: 80;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+#pause-hint.active { opacity: 1; }
+.ph-text {
+  font-family: 'Orbitron', monospace;
+  font-size: 36px;
+  font-weight: 800;
+  color: var(--text-primary);
+  text-shadow: 0 0 24px var(--ct-glow);
+  margin-bottom: 8px;
+}
+.ph-sub {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+/* ============ 死亡界面 ============ */
+#death-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s var(--easing-spring);
+}
+#death-screen.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ds-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at center, rgba(255, 32, 64, 0.12) 0%, transparent 50%),
+    linear-gradient(180deg, rgba(11, 12, 16, 0.85) 0%, rgba(11, 12, 16, 0.95) 100%);
+  backdrop-filter: blur(2px);
+}
+.ds-content {
+  position: relative;
+  text-align: center;
+  padding: 32px 48px;
+  border-left: 3px solid var(--danger);
+  background: linear-gradient(90deg, rgba(255, 32, 64, 0.08) 0%, transparent 100%);
+  animation: ds-slide-in 0.5s var(--easing-spring);
+}
+@keyframes ds-slide-in {
+  from { transform: translateX(-30px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+.ds-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 56px;
+  font-weight: 900;
+  color: var(--danger);
+  text-shadow: 0 0 32px rgba(255, 32, 64, 0.6);
+  letter-spacing: 4px;
+  margin-bottom: 24px;
+}
+.ds-killer-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 18px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}
+.ds-killed-by {
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  font-size: 13px;
+}
+.ds-killer-name {
+  color: var(--text-primary);
+  font-weight: 700;
+  font-size: 22px;
+}
+.ds-separator {
+  color: var(--text-muted);
+}
+.ds-weapon {
+  color: var(--ct-primary);
+  font-weight: 600;
+  text-shadow: 0 0 6px var(--ct-glow);
+}
+.ds-headshot-tag {
+  display: none;
+  padding: 2px 8px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  border-radius: 2px;
+  text-transform: uppercase;
+}
+.ds-headshot-tag.show { display: inline-block; }
+.ds-stats {
+  display: flex;
+  gap: 48px;
+  justify-content: center;
+  margin-bottom: 32px;
+}
+.ds-stat {
+  text-align: center;
+}
+.ds-stat-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.ds-stat-value {
+  font-family: 'Orbitron', monospace;
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.ds-hint {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+/* ============ 性能降级 ============ */
+body.low-fps .hud-corner,
+body.low-fps #top-scoreboard,
+body.low-fps .economy-bar,
+body.low-fps #weapon-bar,
+body.low-fps #scoreboard,
+body.low-fps #round-end-panel {
+  backdrop-filter: blur(var(--blur-low));
+  -webkit-backdrop-filter: blur(var(--blur-low));
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 768px) {
+  #hp-armor-panel { width: 90px; height: 90px; }
+  .hp-value { font-size: 22px; }
+  .ammo-mag { font-size: 28px; }
+  #top-scoreboard { padding: 4px; }
+  .score-team { padding: 4px 12px; min-width: 60px; }
+  .score-value { font-size: 22px; }
+  #weapon-bar { gap: 4px; }
+  .weapon-slot { padding: 4px 8px; min-width: 50px; }
+  .slot-name { font-size: 11px; }
+}

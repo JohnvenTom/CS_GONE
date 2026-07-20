@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CS:GONE - 浏览器 3D 战术射击</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- 3D 游戏画布容器 -->
+  <div id="game-container">
+    <canvas id="game-canvas"></canvas>
+  </div>
+
+  <!-- 准星 -->
+  <div id="crosshair">
+    <div class="ch-line ch-top"></div>
+    <div class="ch-line ch-bottom"></div>
+    <div class="ch-line ch-left"></div>
+    <div class="ch-line ch-right"></div>
+    <div class="ch-dot"></div>
+  </div>
+
+  <!-- 命中标记 -->
+  <div id="hit-marker"></div>
+
+  <!-- 顶部中央 - 比分板 -->
+  <div id="top-scoreboard">
+    <div class="score-team ct">
+      <span class="score-value" id="ct-score">0</span>
+      <span class="score-label">CT</span>
+    </div>
+    <div class="score-divider">
+      <div class="round-info">
+        <span id="round-phase">准备</span>
+        <span class="round-timer" id="round-timer">5</span>
+      </div>
+      <div class="round-count" id="round-count">第 1 / 24 局</div>
+    </div>
+    <div class="score-team t">
+      <span class="score-label">T</span>
+      <span class="score-value" id="t-score">0</span>
+    </div>
+  </div>
+
+  <!-- 顶部两侧 - 队伍经济 -->
+  <div id="economy-ct" class="economy-bar">
+    <span class="eco-label">CT 经济</span>
+    <span class="eco-value" id="ct-eco">$4000</span>
+  </div>
+  <div id="economy-t" class="economy-bar">
+    <span class="eco-label">T 经济</span>
+    <span class="eco-value" id="t-eco">$4000</span>
+  </div>
+
+  <!-- 左下角 - 生命值/护甲 -->
+  <div id="hp-armor-panel" class="hud-corner">
+    <div class="vitals-ring">
+      <svg viewBox="0 0 100 100" class="ring-svg">
+        <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
+        <circle class="ring-hp" cx="50" cy="50" r="42"></circle>
+        <circle class="ring-armor" cx="50" cy="50" r="34"></circle>
+      </svg>
+      <div class="vitals-values">
+        <div class="hp-value" id="hp-value">100</div>
+        <div class="armor-value" id="armor-value">0</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右下角 - 弹药 -->
+  <div id="ammo-panel" class="hud-corner">
+    <div class="ammo-weapon" id="ammo-weapon">USP-S</div>
+    <div class="ammo-count">
+      <span class="ammo-mag" id="ammo-mag">12</span>
+      <span class="ammo-sep">/</span>
+      <span class="ammo-reserve" id="ammo-reserve">24</span>
+    </div>
+    <div class="ammo-reload-bar" id="reload-bar"></div>
+  </div>
+
+  <!-- 正下方 - 武器栏 -->
+  <div id="weapon-bar">
+    <div class="weapon-slot" data-slot="1"><span class="slot-key">1</span><span class="slot-name" id="slot-1">USP-S</span></div>
+    <div class="weapon-slot" data-slot="2"><span class="slot-key">2</span><span class="slot-name" id="slot-2">—</span></div>
+    <div class="weapon-slot" data-slot="3"><span class="slot-key">3</span><span class="slot-name" id="slot-3">—</span></div>
+    <div class="weapon-slot" data-slot="4"><span class="slot-key">4</span><span class="slot-name" id="slot-4">—</span></div>
+  </div>
+
+  <!-- 击杀反馈 -->
+  <div id="kill-feed"></div>
+  <div id="kill-reward"></div>
+  <div id="headshot-banner">HEADSHOT!</div>
+
+  <!-- 伤害指示器 -->
+  <div id="damage-indicators"></div>
+
+  <!-- 受伤红屏 -->
+  <div id="damage-vignette"></div>
+
+  <!-- 浮动伤害数字 -->
+  <div id="floating-damages"></div>
+
+  <!-- 购买转轮画布 -->
+  <canvas id="buy-wheel-canvas"></canvas>
+  <div id="buy-wheel-info">
+    <div class="bw-money" id="bw-money">$800</div>
+    <div class="bw-name" id="bw-name">选择装备</div>
+    <div class="bw-stats" id="bw-stats"></div>
+  </div>
+  <div id="buy-hint" class="buy-hint">B 关闭转轮 · 数字键 1-8 选择类别 · Q/E 切换子武器 · 左键购买</div>
+
+  <!-- 计分板 -->
+  <div id="scoreboard">
+    <div class="sb-header">
+      <div class="sb-team ct">反恐精英 <span id="sb-ct-score">0</span></div>
+      <div class="sb-vs">VS</div>
+      <div class="sb-team t"><span id="sb-t-score">0</span> 恐怖分子</div>
+    </div>
+    <div class="sb-body">
+      <div class="sb-column" id="sb-ct-column"></div>
+      <div class="sb-column" id="sb-t-column"></div>
+    </div>
+    <div class="sb-footer">按住 Tab 查看 · 松开关闭</div>
+  </div>
+
+  <!-- 回合结算面板 -->
+  <div id="round-end-panel">
+    <div class="rep-title" id="rep-title">回合胜利</div>
+    <div class="rep-halftime" id="rep-halftime">半场换边 · 阵营互换</div>
+    <div class="rep-mvp" id="rep-mvp"></div>
+    <div class="rep-stats" id="rep-stats"></div>
+    <div class="rep-continue">
+      <div class="rep-progress" id="rep-progress"></div>
+      <span class="rep-continue-text" id="rep-continue-text">下一回合 10s</span>
+    </div>
+  </div>
+
+  <!-- 炸弹状态 -->
+  <div id="bomb-status">
+    <div class="bomb-icon">C4</div>
+    <div class="bomb-timer" id="bomb-timer">40</div>
+    <div class="bomb-state" id="bomb-state">已安装</div>
+  </div>
+
+  <!-- 购买提示 (右上角) -->
+  <div id="purchase-toast"></div>
+
+  <!-- 主菜单 / 加载屏 -->
+  <div id="main-menu">
+    <div class="mm-bg"></div>
+    <div class="mm-content">
+      <h1 class="mm-title">CS<span class="mm-accent">:</span>GONE</h1>
+      <p class="mm-subtitle">Browser Tactical Shooter · Three.js</p>
+      <div class="mm-modes">
+        <button class="mm-btn primary" data-mode="bomb_defusal">
+          <span class="mm-btn-title">爆破模式</span>
+          <span class="mm-btn-desc">5v5 · 安装/拆除 C4</span>
+        </button>
+        <button class="mm-btn" data-mode="team_deathmatch">
+          <span class="mm-btn-title">团队死斗</span>
+          <span class="mm-btn-desc">率先 50 杀获胜</span>
+        </button>
+        <button class="mm-btn" data-mode="practice">
+          <span class="mm-btn-title">人机练习</span>
+          <span class="mm-btn-desc">单挑 AI 熟悉操作</span>
+        </button>
+      </div>
+      <div class="mm-controls">
+        <div class="mm-control-row"><kbd>WASD</kbd> 移动 · <kbd>鼠标</kbd> 视角 · <kbd>左键</kbd> 射击</div>
+        <div class="mm-control-row"><kbd>R</kbd> 换弹 · <kbd>Shift</kbd> 静步 · <kbd>Space</kbd> 跳跃 · <kbd>Ctrl</kbd> 蹲伏</div>
+        <div class="mm-control-row"><kbd>B</kbd> 购买转轮 · <kbd>1-4</kbd> 切换武器 · <kbd>Tab</kbd> 计分板 · <kbd>F</kbd> 检视武器</div>
+      </div>
+      <div class="mm-footer">点击模式开始游戏 · 鼠标将被锁定 · 按 ESC 释放</div>
+    </div>
+  </div>
+
+  <!-- 加载状态 -->
+  <div id="loading-screen">
+    <div class="ls-spinner"></div>
+    <div class="ls-text">加载战场资源中...</div>
+  </div>
+
+  <!-- 暂停提示 -->
+  <div id="pause-hint">
+    <div class="ph-text">游戏暂停</div>
+    <div class="ph-sub">点击屏幕继续 · ESC 释放鼠标</div>
+  </div>
+
+  <!-- 死亡界面 -->
+  <div id="death-screen">
+    <div class="ds-vignette"></div>
+    <div class="ds-content">
+      <div class="ds-title">你已阵亡</div>
+      <div class="ds-killer-row">
+        <span class="ds-killed-by">击杀者</span>
+        <span class="ds-killer-name" id="ds-killer-name">—</span>
+        <span class="ds-separator">·</span>
+        <span class="ds-weapon" id="ds-weapon">—</span>
+        <span class="ds-headshot-tag" id="ds-headshot-tag">爆头</span>
+      </div>
+      <div class="ds-stats">
+        <div class="ds-stat">
+          <div class="ds-stat-label">本局击杀</div>
+          <div class="ds-stat-value" id="ds-kills">0</div>
+        </div>
+        <div class="ds-stat">
+          <div class="ds-stat-label">累计伤害</div>
+          <div class="ds-stat-value" id="ds-damage">0</div>
+        </div>
+        <div class="ds-stat">
+          <div class="ds-stat-label">阵亡次数</div>
+          <div class="ds-stat-value" id="ds-deaths">0</div>
+        </div>
+      </div>
+      <div class="ds-hint">等待回合结束 · 下一局自动重生</div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
