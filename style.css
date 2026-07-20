@@ -136,11 +136,25 @@ html, body {
 #crosshair.moving .ch-left { left: 0; width: 12px; }
 #crosshair.moving .ch-right { right: 0; width: 12px; }
 
+#crosshair.firing .ch-line {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
 #crosshair.firing .ch-top {
   top: -6px;
   height: 14px;
-  background: var(--danger);
-  box-shadow: 0 0 6px var(--danger);
+}
+#crosshair.firing .ch-bottom {
+  bottom: -6px;
+  height: 14px;
+}
+#crosshair.firing .ch-left {
+  left: -6px;
+  width: 14px;
+}
+#crosshair.firing .ch-right {
+  right: -6px;
+  width: 14px;
 }
 
 #hit-marker {
@@ -1077,6 +1091,155 @@ html, body {
   font-size: 12px;
   color: var(--text-dim);
   letter-spacing: 1px;
+}
+
+/* ============ 选边浮层 ============ */
+#team-select {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s var(--easing-spring);
+}
+#team-select.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ts-bg {
+  position: absolute;
+  inset: 0;
+  background: rgba(11, 12, 16, 0.85);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+}
+.ts-content {
+  position: relative;
+  text-align: center;
+  z-index: 1;
+}
+.ts-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 4px;
+  background: linear-gradient(135deg, var(--ct-primary) 0%, var(--text-primary) 50%, var(--t-primary) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 8px;
+}
+.ts-sub {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 16px;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  margin-bottom: 40px;
+}
+.ts-teams {
+  display: flex;
+  gap: 32px;
+  margin-bottom: 32px;
+  justify-content: center;
+}
+.ts-team {
+  position: relative;
+  width: 220px;
+  padding: 32px 24px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(var(--blur-strong));
+  -webkit-backdrop-filter: blur(var(--blur-strong));
+  border: 2px solid var(--border-glow);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.25s var(--easing-spring);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.ts-team:hover {
+  transform: translateY(-8px);
+}
+.ts-team.ct:hover {
+  border-color: var(--ct-primary);
+  box-shadow: 0 12px 32px var(--ct-glow);
+}
+.ts-team.t:hover {
+  border-color: var(--t-primary);
+  box-shadow: 0 12px 32px var(--t-glow);
+}
+.ts-team-icon {
+  font-family: 'Orbitron', monospace;
+  font-size: 56px;
+  font-weight: 900;
+  letter-spacing: 4px;
+}
+.ts-team.ct .ts-team-icon {
+  color: var(--ct-primary);
+  text-shadow: 0 0 20px var(--ct-glow);
+}
+.ts-team.t .ts-team-icon {
+  color: var(--t-primary);
+  text-shadow: 0 0 20px var(--t-glow);
+}
+.ts-team-name {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 8px;
+}
+.ts-team-desc {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+.ts-back {
+  background: transparent;
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  padding: 8px 32px;
+  color: var(--text-muted);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: all 0.2s var(--easing-spring);
+}
+.ts-back:hover {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+}
+
+/* ============ 死亡界面换边按钮 ============ */
+.ds-actions {
+  margin-top: 24px;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+.ds-action-btn {
+  background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(255,85,0,0.15));
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  padding: 10px 28px;
+  color: var(--text-primary);
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: all 0.25s var(--easing-spring);
+}
+.ds-action-btn:hover {
+  border-color: var(--warn);
+  box-shadow: 0 0 16px rgba(255,170,0,0.4);
+  transform: translateY(-2px);
 }
 
 /* ============ 加载屏 ============ */

@@ -118,9 +118,13 @@ export class Game {
   /**
    * 开始游戏
    * @param {string} mode 游戏模式
+   * @param {string} [team] 玩家阵营 'ct' | 't'，未指定则保持当前 playerTeam
    */
-  startGame(mode) {
+  startGame(mode, team) {
     this.mode = mode;
+    if (team === 'ct' || team === 't') {
+      this.playerTeam = team;
+    }
     this.state.round = 1;
     this.state.ctScore = 0;
     this.state.tScore = 0;
@@ -182,6 +186,39 @@ export class Game {
       this.allBots.push(bot);
       this.enemies.push(bot);
     }
+
+    // 预编译着色器 + 预上传 GPU 资源，消除旋转视角到新角度时的首次渲染卡顿
+    this._precompileScene();
+  }
+
+  /**
+   * 预编译着色器并预上传 GPU 资源
+   * 通过临时禁用视锥剔除，渲染一帧，确保所有 mesh 的着色器变体被编译、
+   * 几何体和纹理数据被上传到 GPU。
+   * 这样玩家旋转视角到任何角度时，都不会触发首次渲染导致的卡顿。
+   * 注意事项：仅在 _spawnTeams 后调用一次，避免重复开销
+   * @private
+   */
+  _precompileScene() {
+    const scene = this.engine.scene;
+    const camera = this.engine.camera;
+    const renderer = this.engine.renderer;
+
+    // 记录原始 frustumCulled 值，临时禁用视锥剔除
+    const culledMeshes = [];
+    scene.traverse(obj => {
+      if (obj.isMesh && obj.frustumCulled) {
+        culledMeshes.push(obj);
+        obj.frustumCulled = false;
+      }
+    });
+
+    // 预编译着色器变体 + 预渲染（触发 GPU 资源上传）
+    renderer.compile(scene, camera);
+    renderer.render(scene, camera);
+
+    // 恢复视锥剔除（后续正常渲染时启用，降低 draw call）
+    culledMeshes.forEach(m => { m.frustumCulled = true; });
   }
 
   /**
@@ -300,18 +337,107 @@ export class Game {
       }
     };
 
-    // 主菜单按钮
+    // 主菜单按钮：点击模式后打开选边浮层（不直接开始游戏）
     document.querySelectorAll('.mm-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const mode = btn.dataset.mode;
         this.audio.init();
         this.audio.resume();
+        this._openTeamSelect(mode);
+      });
+    });
+
+    // 选边浮层：选择阵营
+    document.querySelectorAll('.ts-team').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const team = btn.dataset.team;
+        const mode = this._pendingMode;
+        this._closeTeamSelect();
         document.getElementById('main-menu').classList.add('hidden');
-        this.startGame(mode);
+        this.startGame(mode, team);
         // 在 click 用户手势内同步请求指针锁定（避免 Promise 拒绝）
         this.input.requestPointerLock();
       });
     });
+
+    // 选边浮层：返回主菜单
+    const tsBack = document.getElementById('ts-back');
+    if (tsBack) {
+      tsBack.addEventListener('click', () => {
+        this._closeTeamSelect();
+      });
+    }
+
+    // 死亡界面：换边重生按钮
+    const dsSwitchBtn = document.getElementById('ds-switch-team');
+    if (dsSwitchBtn) {
+      dsSwitchBtn.addEventListener('click', () => {
+        this._switchPlayerTeam();
+      });
+    }
+  }
+
+  /**
+   * 打开选边浮层
+   * @param {string} mode 游戏模式
+   * @private
+   */
+  _openTeamSelect(mode) {
+    this._pendingMode = mode;
+    const ts = document.getElementById('team-select');
+    if (!ts) return;
+    const modeLabels = {
+      bomb_defusal: '爆破模式 · 5v5',
+      team_deathmatch: '团队死斗 · 50 杀获胜',
+      practice: '人机练习 · 单挑 AI'
+    };
+    const labelEl = document.getElementById('ts-mode-label');
+    if (labelEl) labelEl.textContent = modeLabels[mode] || '选择你想加入的队伍';
+    ts.classList.add('active');
+  }
+
+  /**
+   * 关闭选边浮层
+   * @private
+   */
+  _closeTeamSelect() {
+    const ts = document.getElementById('team-select');
+    if (ts) ts.classList.remove('active');
+    this._pendingMode = null;
+  }
+
+  /**
+   * 玩家主动换边：切换阵营并立即重生
+   * 规则：
+   *  - 切换 playerTeam 与 player.team
+   *  - 重新生成双方 AI（让玩家加入新阵营的队友）
+   *  - 立即触发 _startFreezeTime 重生玩家
+   *  - 重置比分与经济（用户主动换边视为重新开局）
+   * @private
+   */
+  _switchPlayerTeam() {
+    const newTeam = this.playerTeam === 'ct' ? 't' : 'ct';
+    this.playerTeam = newTeam;
+    this.player.team = newTeam;
+
+    // 重置比分与经济（视为新开局）
+    this.state.ctScore = 0;
+    this.state.tScore = 0;
+    this.state.ctMoney = 4000;
+    this.state.tMoney = 4000;
+    this.state.ctLosingStreak = 0;
+    this.state.tLosingStreak = 0;
+    this.state.round = 1;
+
+    // 关闭死亡界面
+    this._hideDeathScreen();
+
+    // 重新生成队伍（含预编译）+ 启动冻结时间
+    this._spawnTeams();
+    this._startFreezeTime();
+
+    // 恢复指针锁定
+    this.input.requestPointerLock();
   }
 
   /**

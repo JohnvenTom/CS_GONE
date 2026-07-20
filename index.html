@@ -174,7 +174,29 @@
         <div class="mm-control-row"><kbd>R</kbd> 换弹 · <kbd>Shift</kbd> 静步 · <kbd>Space</kbd> 跳跃 · <kbd>Ctrl</kbd> 蹲伏</div>
         <div class="mm-control-row"><kbd>B</kbd> 购买转轮 · <kbd>1-4</kbd> 切换武器 · <kbd>Tab</kbd> 计分板 · <kbd>F</kbd> 检视武器</div>
       </div>
-      <div class="mm-footer">点击模式开始游戏 · 鼠标将被锁定 · 按 ESC 释放</div>
+      <div class="mm-footer">点击模式选择阵营 · 鼠标将被锁定 · 按 ESC 释放</div>
+    </div>
+  </div>
+
+  <!-- 选边浮层 -->
+  <div id="team-select">
+    <div class="ts-bg"></div>
+    <div class="ts-content">
+      <h2 class="ts-title">选择阵营</h2>
+      <p class="ts-sub" id="ts-mode-label">选择你想加入的队伍</p>
+      <div class="ts-teams">
+        <button class="ts-team ct" data-team="ct">
+          <div class="ts-team-icon">CT</div>
+          <div class="ts-team-name">反恐精英</div>
+          <div class="ts-team-desc">拆除 C4 · 保卫目标</div>
+        </button>
+        <button class="ts-team t" data-team="t">
+          <div class="ts-team-icon">T</div>
+          <div class="ts-team-name">恐怖分子</div>
+          <div class="ts-team-desc">安装 C4 · 引爆目标</div>
+        </button>
+      </div>
+      <button class="ts-back" id="ts-back">返回</button>
     </div>
   </div>
 
@@ -217,6 +239,9 @@
         </div>
       </div>
       <div class="ds-hint">等待回合结束 · 下一局自动重生</div>
+      <div class="ds-actions">
+        <button class="ds-action-btn" id="ds-switch-team">换边重生</button>
+      </div>
     </div>
   </div>
 
