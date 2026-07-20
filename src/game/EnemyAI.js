@@ -1465,8 +1465,9 @@ export class EnemyAI {
       // ---- 计算初始冲量：基于受击方向 _hurtDir ----
       // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（向左倒）、π=正后受击（向前倒）
       const hurtDir = this._hurtDir || 0;
-      // v3.4 调整：再次增大初始冲量（32-44 → 50-70 弧度/秒）
-      const impulseStrength = 50.0 + Math.random() * 20.0;
+      // v3.5 调整：回调冲量（v3.4 的 50-70 太大，倒地过快 0.13s；v3.2 的 20-28 偏慢 0.83s）
+      // v3.5 二次调整：28-38 仍偏快（0.34s），再降到 18-26，目标 0.5-0.7s 自然倒地感
+      const impulseStrength = 18.0 + Math.random() * 8.0;
 
       // rotation.x 通道：正前受击 → 向后倒（rotation.x 变负）；正后受击 → 向前倒（变正）
       const frontBackImpulse = -Math.cos(hurtDir) * impulseStrength;
@@ -1475,9 +1476,9 @@ export class EnemyAI {
       this._ragdollAngularVel.x = frontBackImpulse;
       this._ragdollAngularVel.z = sideImpulse;
 
-      // v3.4 新增：给 group 一个初始倾角（朝倒地方向），让重力矩立刻生效
-      // 避免初始直立状态时重力矩 sin(0)=0 无法加速倒地
-      const initialTilt = 0.2;
+      // v3.5 调整：初始倾角从 0.08 减小到 0.03（让重力矩启动更平缓）
+      // 保留小倾角让重力矩立刻生效，但不过早加速
+      const initialTilt = 0.03;
       this.group.rotation.x = -Math.cos(hurtDir) * initialTilt;
       this.group.rotation.z = -Math.sin(hurtDir) * initialTilt;
 
@@ -1510,11 +1511,11 @@ export class EnemyAI {
     const elapsed = this._deathElapsed;
 
     // ---- 物理参数 ----
-    // v3.4 调整：阻尼从 0.72 提高到 0.88，让冲量保持更久（倒地更快）
-    const GRAVITY = 65.0;              // 重力加速度（保持 v3.3 的 65）
-    const ANGULAR_DAMP = 0.88;         // group 角速度阻尼（0.72 → 0.88，冲量保持更久）
-    const JOINT_DAMP = 0.82;           // 关节角速度阻尼（0.68 → 0.82，关节冲量保持更久）
-    const MAX_TILT = Math.PI / 2 - 0.02;  // 最大倾角（接近 π/2 时触地），放宽阈值让触地更早
+    // v3.5 调整：回调重力与阻尼（v3.4 倒地 0.13s 过快，目标 0.5-0.7s 自然倒地）
+    const GRAVITY = 45.0;              // 重力加速度（65 → 45，重力矩减小，倒地稍慢）
+    const ANGULAR_DAMP = 0.82;         // group 角速度阻尼（0.88 → 0.82，冲量衰减稍快）
+    const JOINT_DAMP = 0.76;           // 关节角速度阻尼（0.82 → 0.76，关节稍松散）
+    const MAX_TILT = Math.PI / 2 - 0.02;  // 最大倾角（接近 π/2 时触地）
     const SETTLE_THRESHOLD = 0.08;     // 角速度低于此值视为稳定
 
     // ---- 1. 整体倒地物理（group 旋转）----
@@ -1559,9 +1560,10 @@ export class EnemyAI {
       }
 
       // 检查是否稳定：触地后（tilt 接近 MAX_TILT）立即 settled
-      // v3.4 调整：放宽条件，触地即 settled（不再要求 angVelMag < 0.08）
+      // v3.5 调整：收紧条件，要求 tilt 真正接近 MAX_TILT（差值 < 0.03）才 settled
+      // v3.4 的 MAX_TILT - 0.1 太宽松，tilt 才到 1.45 就 settled（看起来没真正倒地）
       const tiltMagNow = Math.sqrt(this.group.rotation.x ** 2 + this.group.rotation.z ** 2);
-      if (tiltMagNow >= MAX_TILT - 0.1) {
+      if (tiltMagNow >= MAX_TILT - 0.03) {
         this._ragdollSettled = true;
         this._ragdollAngularVel.set(0, 0, 0);
       }
