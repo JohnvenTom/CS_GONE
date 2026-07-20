@@ -1394,7 +1394,8 @@ export class EnemyAI {
       // ---- 计算初始冲量：基于受击方向 _hurtDir ----
       // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（向左倒）、π=正后受击（向前倒）
       const hurtDir = this._hurtDir || 0;
-      const impulseStrength = 4.0 + Math.random() * 2.5;  // 4-6.5 弧度/秒，每次不同
+      // v3.1 调整：增大初始冲量，让击杀反作用力更明显（4-6.5 → 9-13 弧度/秒）
+      const impulseStrength = 9.0 + Math.random() * 4.0;
 
       // rotation.x 通道：正前受击 → 向后倒（rotation.x 变负）；正后受击 → 向前倒（变正）
       const frontBackImpulse = -Math.cos(hurtDir) * impulseStrength;
@@ -1432,9 +1433,10 @@ export class EnemyAI {
     const elapsed = this._deathElapsed;
 
     // ---- 物理参数 ----
-    const GRAVITY = 12.0;              // 重力加速度（影响倒地速度）
-    const ANGULAR_DAMP = 0.92;         // group 角速度阻尼（每帧衰减）
-    const JOINT_DAMP = 0.88;           // 关节角速度阻尼（更松散）
+    // v3.1 调整：增大重力 + 降低阻尼，让倒地更快更有冲量感
+    const GRAVITY = 22.0;              // 重力加速度（12 → 22，倒地更快）
+    const ANGULAR_DAMP = 0.86;         // group 角速度阻尼（0.92 → 0.86，冲量衰减更慢）
+    const JOINT_DAMP = 0.82;           // 关节角速度阻尼（0.88 → 0.82，关节更松散）
     const MAX_TILT = Math.PI / 2 - 0.05;  // 最大倾角（接近 π/2 时触地）
     const SETTLE_THRESHOLD = 0.05;     // 角速度低于此值视为稳定
 
@@ -1463,17 +1465,19 @@ export class EnemyAI {
       this.group.rotation.z += this._ragdollAngularVel.z * delta;
 
       // 重心下降（倾倒过程中 group.position.y 降低，模拟重心降低）
+      // v3.1 调整：lerp 系数 0.1 → 0.25，重心下降更快（下落感更真实）
       const targetY = Math.max(0, 0.5 * (1 - tiltMag / MAX_TILT));
-      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, targetY, 0.1);
+      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, targetY, 0.25);
 
       // 地面碰撞检测：倾角超过 MAX_TILT 时停止并轻微反弹
+      // v3.1 调整：反弹系数 0.3 → 0.12（冲量增大后避免回弹过多）
       if (Math.abs(this.group.rotation.x) >= MAX_TILT) {
         this.group.rotation.x = Math.sign(this.group.rotation.x) * MAX_TILT;
-        this._ragdollAngularVel.x = -this._ragdollAngularVel.x * 0.3;
+        this._ragdollAngularVel.x = -this._ragdollAngularVel.x * 0.12;
       }
       if (Math.abs(this.group.rotation.z) >= MAX_TILT) {
         this.group.rotation.z = Math.sign(this.group.rotation.z) * MAX_TILT;
-        this._ragdollAngularVel.z = -this._ragdollAngularVel.z * 0.3;
+        this._ragdollAngularVel.z = -this._ragdollAngularVel.z * 0.12;
       }
 
       // 检查是否稳定（角速度很小且已触地）
