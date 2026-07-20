@@ -109,6 +109,11 @@ export class EnemyAI {
     this._lastAvoidCheck = 0;
     // 当前避障偏转方向（-1 左，0 直行，1 右）
     this._avoidSteer = 0;
+    // 长期卡住恢复计数（v3 新增）：短时间内反复触发卡住恢复时累加
+    // 超过阈值后放弃当前目标（如巡逻点在墙后无通道），避免在墙边无限来回
+    this._stuckRecoveryCount = 0;
+    // 最后一次卡住恢复的时间戳（秒），用于衰减计数器
+    this._lastStuckRecoveryTime = 0;
     // 个人性格种子（不同 AI 有不同行为偏好）
     this._personality = Math.random();
     // retreat 冷却到期时间戳（秒）：避免低血量时 engage↔retreat 死循环抖动
@@ -610,9 +615,12 @@ export class EnemyAI {
     rightFingers.castShadow = false;
     rightElbowGroup.add(rightFingers);
 
-    // ---- 武器组（挂在右肘下，本地坐标枪口朝 -Z）----
+    // ---- 武器组（挂在右肘下）----
+    // 修复：武器部件本地 z 坐标枪口朝 -Z，但人体正面朝 +Z
+    // 通过 weaponGroup.rotation.y = π 翻转武器朝向，让枪口与人体正面一致
     const weaponGroup = new THREE.Group();
     weaponGroup.position.set(0, -0.30, -0.10);
+    weaponGroup.rotation.y = Math.PI;  // 翻转武器朝向，枪口朝 +Z（与人体正面一致）
     rightElbowGroup.add(weaponGroup);
     this.weaponGroup = weaponGroup;
 
@@ -1086,7 +1094,16 @@ export class EnemyAI {
     }
 
     // ---- 物理碰撞解决 ----
-    this.physics.resolve(this.position, this.radius, this.height);
+    // 改进（v2）：处理撞墙反馈，清零法线速度分量，避免持续推墙震荡
+    const collision = this.physics.resolve(this.position, this.radius, this.height);
+    if (collision.collided && collision.normal.lengthSq() > 0.01) {
+      // 撞墙：将速度沿墙法线分量清零（保留切线分量，让 AI 沿墙滑动）
+      const velDotNormal = this.velocity.x * collision.normal.x + this.velocity.z * collision.normal.z;
+      if (velDotNormal < 0) {  // 只有朝墙推时才清零（避免背离墙时误清）
+        this.velocity.x -= velDotNormal * collision.normal.x;
+        this.velocity.z -= velDotNormal * collision.normal.z;
+      }
+    }
 
     // ---- 同步模型位置 ----
     this.group.position.copy(this.position);
@@ -1325,97 +1342,243 @@ export class EnemyAI {
   }
 
   /**
-   * 多阶段死亡动画 v2：头后仰 → 跪倒 → 倒地（带缓动 + 随机倒向）
+   * 物理动力学倒地系统 v3（Pseudo-Ragdoll）
    * --------------------------------------------------------------
-   * 阶段1 (0-0.3s)：头部剧烈后仰 + 胸腔后仰 + 双臂张开（失去控制）
-   * 阶段2 (0.3-0.7s)：双腿弯曲跪倒（hipGroup 下降）+ 手臂垂下
-   * 阶段3 (0.7-1.2s)：整体倒地（前倒/左倒/右倒，由 _deathFallDir 决定）
-   * 改进点（v2）：
-   *  - 使用 easeOutCubic 缓动函数（1-(1-t)^3）替代线性插值
-   *  - 倒地方向随机：前倒（rotation.x）、左倒（rotation.z = +π/2）、右倒（rotation.z = -π/2）
-   *  - 阶段3 加入肘关节自然弯曲（前臂垂落）
-   *  - 头部最终归位时考虑倒地方向，让头朝向自然
-   * @param {number} delta
+   * 替代 v2 的脚本动画，使用伪物理模拟实现自然倒地：
+   *
+   * 物理模型：
+   *  - 整体倒地：group 绕 X/Z 轴有角速度（ωx, ωz）
+   *    · 重力矩：τ = g * sin(θ) （θ 为当前倾斜角，越倾斜重力矩越大）
+   *    · 角加速度：α = τ / I （I 为转动惯量，简化为 1）
+   *    · 阻尼：ω *= 0.92 每帧（空气阻力 + 关节摩擦）
+   *    · 地面碰撞：倾角接近 π/2 时停止（角速度归零）
+   *  - 关节松弛：头/颈/胸/手臂/肘/腿/膝各关节有独立角速度
+   *    · 重力驱动：各关节朝"自然下垂"方向旋转（如手臂下垂、头前倾）
+   *    · 弹簧约束：每个关节有目标角度范围（避免穿模），超出时弹簧拉回
+   *    · 阻尼：关节角速度衰减
+   *  - 初始冲量：基于受击方向（_hurtDir）给 group 和关节初始角速度
+   *
+   * 优点：
+   *  - 每次倒地姿态不同（受随机扰动 + 初始冲量影响）
+   *  - 自然过渡（无脚本切换的生硬感）
+   *  - 物理参数可调（重力、阻尼、弹簧强度）
+   *
+   * @param {number} delta 帧时间（秒）
    * @private
    */
   _updateDeathAnimation(delta) {
-    // 使用 delta 累积时间（修复：避免低帧率时 performance.now() 跳过中间阶段）
+    // ---- 初始化（死亡瞬间触发物理状态）----
     if (this._deathStage === 0) {
-      // 死亡瞬间触发：记录开始时间
       this._deathElapsed = 0;
       this._deathStage = 1;
+
+      // group 整体角速度（ωx, ωy, ωz）
+      this._ragdollAngularVel = new THREE.Vector3(0, 0, 0);
+      this._ragdollSettled = false;  // 是否已稳定
+
+      // 关节独立角速度（每个关节有独立物理）
+      this._jointAngVel = {
+        head:  new THREE.Vector3(0, 0, 0),
+        neck:  new THREE.Vector3(0, 0, 0),
+        chest: new THREE.Vector3(0, 0, 0),
+        lArm:  new THREE.Vector3(0, 0, 0),
+        rArm:  new THREE.Vector3(0, 0, 0),
+        lElbow:new THREE.Vector3(0, 0, 0),
+        rElbow:new THREE.Vector3(0, 0, 0),
+        lLeg:  new THREE.Vector3(0, 0, 0),
+        rLeg:  new THREE.Vector3(0, 0, 0),
+        lKnee: new THREE.Vector3(0, 0, 0),
+        rKnee: new THREE.Vector3(0, 0, 0)
+      };
+
+      // ---- 计算初始冲量：基于受击方向 _hurtDir ----
+      // _hurtDir：0=正前受击（应向后倒）、π/2=右侧受击（向左倒）、π=正后受击（向前倒）
+      const hurtDir = this._hurtDir || 0;
+      const impulseStrength = 4.0 + Math.random() * 2.5;  // 4-6.5 弧度/秒，每次不同
+
+      // rotation.x 通道：正前受击 → 向后倒（rotation.x 变负）；正后受击 → 向前倒（变正）
+      const frontBackImpulse = -Math.cos(hurtDir) * impulseStrength;
+      // rotation.z 通道：右侧受击 → 向左倒（rotation.z 变正）；左侧受击 → 向右倒（变负）
+      const sideImpulse = -Math.sin(hurtDir) * impulseStrength;
+      this._ragdollAngularVel.x = frontBackImpulse;
+      this._ragdollAngularVel.z = sideImpulse;
+
+      // ---- 关节初始冲量（痉挛式松弛）----
+      // 头部受击后甩动方向与 group 一致，但更剧烈
+      const headImpulse = impulseStrength * 1.4;
+      this._jointAngVel.head.x = -Math.cos(hurtDir) * headImpulse + (Math.random() - 0.5) * 2.0;
+      this._jointAngVel.head.z = -Math.sin(hurtDir) * headImpulse + (Math.random() - 0.5) * 2.0;
+      this._jointAngVel.neck.x = this._jointAngVel.head.x * 0.5;
+      this._jointAngVel.neck.z = this._jointAngVel.head.z * 0.5;
+      this._jointAngVel.chest.x = this._jointAngVel.head.x * 0.3;
+      this._jointAngVel.chest.z = this._jointAngVel.head.z * 0.3;
+
+      // 双臂张开（失去控制）：左臂向左甩，右臂向右甩
+      this._jointAngVel.lArm.z = impulseStrength * 1.2 + Math.random() * 1.0;
+      this._jointAngVel.rArm.z = -impulseStrength * 1.2 - Math.random() * 1.0;
+      // 肘关节弯曲（松弛）
+      this._jointAngVel.lElbow.x = impulseStrength * 0.8;
+      this._jointAngVel.rElbow.x = impulseStrength * 0.8;
+
+      // 膝盖瞬间弯软（跪倒前兆）
+      this._jointAngVel.lKnee.x = impulseStrength * 0.5;
+      this._jointAngVel.rKnee.x = impulseStrength * 0.5;
+      // 大腿轻微外摆
+      this._jointAngVel.lLeg.z = -impulseStrength * 0.2;
+      this._jointAngVel.rLeg.z = impulseStrength * 0.2;
     }
+
     this._deathElapsed += delta;
     const elapsed = this._deathElapsed;
 
-    // easeOutCubic 缓动函数：开始快，结束慢，模拟物理减速
-    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+    // ---- 物理参数 ----
+    const GRAVITY = 12.0;              // 重力加速度（影响倒地速度）
+    const ANGULAR_DAMP = 0.92;         // group 角速度阻尼（每帧衰减）
+    const JOINT_DAMP = 0.88;           // 关节角速度阻尼（更松散）
+    const MAX_TILT = Math.PI / 2 - 0.05;  // 最大倾角（接近 π/2 时触地）
+    const SETTLE_THRESHOLD = 0.05;     // 角速度低于此值视为稳定
 
-    // 阶段1：头后仰 + 双臂张开（0-0.3s）
-    if (elapsed < 0.3) {
-      const t1 = easeOutCubic(elapsed / 0.3);
-      this.headGroup.rotation.x = -t1 * 0.6;
-      this.neckGroup.rotation.x = -t1 * 0.3;
-      this.chestGroup.rotation.x = -t1 * 0.3;
-      // 双臂张开（失去控制）
-      this.leftArmGroup.rotation.z = t1 * 0.8;
-      this.rightArmGroup.rotation.z = -t1 * 0.8;
-      // 双肘轻微弯曲（松弛感）
-      this.leftElbowGroup.rotation.x = t1 * 0.3;
-      this.rightElbowGroup.rotation.x = t1 * 0.3;
-    }
-    // 阶段2：跪倒（0.3-0.7s）
-    else if (elapsed < 0.7) {
-      const t2 = easeOutCubic((elapsed - 0.3) / 0.4);
-      // 头部回归（前倾，准备倒地）
-      this.headGroup.rotation.x = -0.6 + t2 * 0.3;
-      this.neckGroup.rotation.x = -0.3 + t2 * 0.2;
-      this.chestGroup.rotation.x = -0.3 + t2 * 0.2;
-      // 膝盖弯曲（跪下）
-      this.leftLegGroup.rotation.x = -t2 * 1.2;
-      this.rightLegGroup.rotation.x = -t2 * 1.2;
-      this.leftKneeGroup.rotation.x = t2 * 1.5;
-      this.rightKneeGroup.rotation.x = t2 * 1.5;
-      // 脚踝自然弯曲（跪姿时脚尖着地）
-      this.leftAnkleGroup.rotation.x = t2 * 0.5;
-      this.rightAnkleGroup.rotation.x = t2 * 0.5;
-      // hipGroup 下降
-      this.hipGroup.position.y = 0.95 - t2 * 0.5;
-      // 手臂垂下
-      this.leftArmGroup.rotation.z = 0.8 - t2 * 0.5;
-      this.rightArmGroup.rotation.z = -0.8 + t2 * 0.5;
-      // 肘关节进一步弯曲（手臂自然垂落）
-      this.leftElbowGroup.rotation.x = 0.3 + t2 * 0.8;
-      this.rightElbowGroup.rotation.x = 0.3 + t2 * 0.8;
-    }
-    // 阶段3：倒地（0.7-1.2s）
-    else if (elapsed < 1.2) {
-      const t3 = easeOutCubic((elapsed - 0.7) / 0.5);
-      // 根据倒地方向应用不同的旋转
-      if (this._deathFallDir === 0) {
-        // 前倒：rotation.x → π/2
-        this.group.rotation.x = t3 * (Math.PI / 2 - 0.1);
-        this.group.rotation.z = 0;
+    // ---- 1. 整体倒地物理（group 旋转）----
+    if (!this._ragdollSettled) {
+      const currentTiltX = this.group.rotation.x;
+      const currentTiltZ = this.group.rotation.z;
+      const tiltMag = Math.sqrt(currentTiltX * currentTiltX + currentTiltZ * currentTiltZ);
+
+      // 重力矩：倾角越大，重力矩越大（加速倒地）
+      if (tiltMag > 0.01) {
+        this._ragdollAngularVel.x += GRAVITY * Math.sin(currentTiltX) * delta;
+        this._ragdollAngularVel.z += GRAVITY * Math.sin(currentTiltZ) * delta;
       } else {
-        // 侧倒：rotation.z → ±π/2
-        this.group.rotation.x = t3 * 0.2;  // 轻微前倾
-        this.group.rotation.z = this._deathFallDir * t3 * (Math.PI / 2 - 0.1);
+        // 几乎直立时给一点扰动启动倒地
+        this._ragdollAngularVel.x += (Math.random() - 0.5) * 0.5 * delta;
+        this._ragdollAngularVel.z += (Math.random() - 0.5) * 0.5 * delta;
       }
-      this.group.position.y = Math.max(0, 0.4 - t3 * 0.4);
-      // 头部最终归位
-      this.headGroup.rotation.x = -0.3 + t3 * 0.3;
-      this.neckGroup.rotation.x = -0.1 + t3 * 0.1;
+
+      // 阻尼
+      this._ragdollAngularVel.x *= ANGULAR_DAMP;
+      this._ragdollAngularVel.z *= ANGULAR_DAMP;
+
+      // 应用角速度
+      this.group.rotation.x += this._ragdollAngularVel.x * delta;
+      this.group.rotation.z += this._ragdollAngularVel.z * delta;
+
+      // 重心下降（倾倒过程中 group.position.y 降低，模拟重心降低）
+      const targetY = Math.max(0, 0.5 * (1 - tiltMag / MAX_TILT));
+      this.group.position.y = THREE.MathUtils.lerp(this.group.position.y, targetY, 0.1);
+
+      // 地面碰撞检测：倾角超过 MAX_TILT 时停止并轻微反弹
+      if (Math.abs(this.group.rotation.x) >= MAX_TILT) {
+        this.group.rotation.x = Math.sign(this.group.rotation.x) * MAX_TILT;
+        this._ragdollAngularVel.x = -this._ragdollAngularVel.x * 0.3;
+      }
+      if (Math.abs(this.group.rotation.z) >= MAX_TILT) {
+        this.group.rotation.z = Math.sign(this.group.rotation.z) * MAX_TILT;
+        this._ragdollAngularVel.z = -this._ragdollAngularVel.z * 0.3;
+      }
+
+      // 检查是否稳定（角速度很小且已触地）
+      const angVelMag = this._ragdollAngularVel.length();
+      if (angVelMag < SETTLE_THRESHOLD && tiltMag >= MAX_TILT - 0.1) {
+        this._ragdollSettled = true;
+      }
     }
-    // 完成：保持倒地姿态
-    else {
-      if (this._deathFallDir === 0) {
-        this.group.rotation.x = Math.PI / 2 - 0.1;
-        this.group.rotation.z = 0;
-      } else {
-        this.group.rotation.x = 0.2;
-        this.group.rotation.z = this._deathFallDir * (Math.PI / 2 - 0.1);
+
+    // ---- 2. 关节物理（独立 ragdoll 摆动）----
+    // 通用关节更新函数：重力驱动 + 阻尼 + 弹簧约束（避免穿模）
+    const updateJoint = (joint, angVel, gravityDir, limits) => {
+      if (!joint) return;
+      // 重力驱动：朝 gravityDir 方向加速
+      angVel.x += gravityDir.x * GRAVITY * 0.5 * delta;
+      angVel.y += gravityDir.y * GRAVITY * 0.5 * delta;
+      angVel.z += gravityDir.z * GRAVITY * 0.5 * delta;
+      // 阻尼
+      angVel.x *= JOINT_DAMP;
+      angVel.y *= JOINT_DAMP;
+      angVel.z *= JOINT_DAMP;
+      // 应用角速度
+      joint.rotation.x += angVel.x * delta;
+      joint.rotation.y += angVel.y * delta;
+      joint.rotation.z += angVel.z * delta;
+      // 弹簧约束：超出角度限制时拉回（带能量损失）
+      if (limits) {
+        if (joint.rotation.x < limits.minX) {
+          joint.rotation.x = limits.minX;
+          angVel.x = Math.abs(angVel.x) * 0.3;
+        } else if (joint.rotation.x > limits.maxX) {
+          joint.rotation.x = limits.maxX;
+          angVel.x = -Math.abs(angVel.x) * 0.3;
+        }
+        if (joint.rotation.z < limits.minZ) {
+          joint.rotation.z = limits.minZ;
+          angVel.z = Math.abs(angVel.z) * 0.3;
+        } else if (joint.rotation.z > limits.maxZ) {
+          joint.rotation.z = limits.maxZ;
+          angVel.z = -Math.abs(angVel.z) * 0.3;
+        }
       }
-      this.group.position.y = 0;
+    };
+
+    // 各关节物理参数：重力方向（朝自然下垂）+ 角度限制（避免穿模）
+    // 头部：前倾下垂
+    updateJoint(this.headGroup, this._jointAngVel.head,
+      new THREE.Vector3(1, 0, 0),
+      {minX: -1.5, maxX: 1.5, minZ: -1.0, maxZ: 1.0});
+    // 颈部：跟随头部但幅度小
+    updateJoint(this.neckGroup, this._jointAngVel.neck,
+      new THREE.Vector3(0.8, 0, 0),
+      {minX: -1.0, maxX: 1.0, minZ: -0.6, maxZ: 0.6});
+    // 胸腔：轻微前倾
+    updateJoint(this.chestGroup, this._jointAngVel.chest,
+      new THREE.Vector3(0.3, 0, 0),
+      {minX: -0.8, maxX: 0.8, minZ: -0.5, maxZ: 0.5});
+    // 左臂：朝身体侧下方甩（rotation.z 增大）
+    updateJoint(this.leftArmGroup, this._jointAngVel.lArm,
+      new THREE.Vector3(0, 0, 1.0),
+      {minX: -1.5, maxX: 1.5, minZ: -0.3, maxZ: 1.8});
+    // 右臂：朝身体侧下方甩（rotation.z 减小）
+    updateJoint(this.rightArmGroup, this._jointAngVel.rArm,
+      new THREE.Vector3(0, 0, -1.0),
+      {minX: -1.5, maxX: 1.5, minZ: -1.8, maxZ: 0.3});
+    // 左肘：弯曲（前臂向前甩）
+    updateJoint(this.leftElbowGroup, this._jointAngVel.lElbow,
+      new THREE.Vector3(1.2, 0, 0),
+      {minX: -0.2, maxX: 2.4, minZ: -0.5, maxZ: 0.5});
+    // 右肘：弯曲
+    updateJoint(this.rightElbowGroup, this._jointAngVel.rElbow,
+      new THREE.Vector3(1.2, 0, 0),
+      {minX: -0.2, maxX: 2.4, minZ: -0.5, maxZ: 0.5});
+    // 左腿：大腿重力下垂 + 轻微外摆
+    updateJoint(this.leftLegGroup, this._jointAngVel.lLeg,
+      new THREE.Vector3(0, 0, -0.2),
+      {minX: -1.5, maxX: 0.3, minZ: -0.8, maxZ: 0.8});
+    // 右腿
+    updateJoint(this.rightLegGroup, this._jointAngVel.rLeg,
+      new THREE.Vector3(0, 0, 0.2),
+      {minX: -1.5, maxX: 0.3, minZ: -0.8, maxZ: 0.8});
+    // 左膝：弯曲（跪倒姿态）
+    updateJoint(this.leftKneeGroup, this._jointAngVel.lKnee,
+      new THREE.Vector3(1.5, 0, 0),
+      {minX: -0.2, maxX: 2.2, minZ: -0.3, maxZ: 0.3});
+    // 右膝
+    updateJoint(this.rightKneeGroup, this._jointAngVel.rKnee,
+      new THREE.Vector3(1.5, 0, 0),
+      {minX: -0.2, maxX: 2.2, minZ: -0.3, maxZ: 0.3});
+
+    // hipGroup 下降（模拟重心降低，配合跪倒）
+    const tiltMag = Math.sqrt(
+      this.group.rotation.x * this.group.rotation.x +
+      this.group.rotation.z * this.group.rotation.z
+    );
+    const targetHipY = Math.max(0.3, 0.95 - tiltMag * 0.5);
+    this.hipGroup.position.y = THREE.MathUtils.lerp(this.hipGroup.position.y, targetHipY, 0.15);
+
+    // ---- 3. 强制停止（5 秒后强制稳定，避免无限小震荡）----
+    if (elapsed > 5.0) {
+      this._ragdollAngularVel.set(0, 0, 0);
+      this._ragdollSettled = true;
+      for (const k in this._jointAngVel) {
+        this._jointAngVel[k].set(0, 0, 0);
+      }
     }
   }
 
@@ -1481,6 +1644,20 @@ export class EnemyAI {
       this._moveDir.set(0, 0, 0);
       // 停留时缓慢扫视四周（增加真实感）
       this.yaw += delta * 0.3 * this.investigateScanDir;
+      return;
+    }
+
+    // v3 新增：长期卡住恢复 —— 8 秒内连续触发 3 次卡住恢复，说明当前路点走不通
+    // （如路点在墙后且无通道），直接跳到下一个路点，避免在墙边无限来回
+    if (this._stuckRecoveryCount >= 3) {
+      this._stuckRecoveryCount = 0;
+      this._avoidSteer = 0;
+      this.patrolIndex = (this.patrolIndex + 1) % this.patrolPoints.length;
+      this.patrolOffset.set(
+        (Math.random() - 0.5) * 3.0,
+        0,
+        (Math.random() - 0.5) * 3.0
+      );
       return;
     }
 
@@ -1596,20 +1773,20 @@ export class EnemyAI {
       // 太近：后撤
       this._moveWithAvoidance(dir.clone().negate(), 3.5, delta);
     } else {
-      // 中距离：横向 strafe（绕侧）
-      // 性格决定偏好方向：50% AI 偏向某一侧
+      // 中距离：横向 strafe（绕侧）+ 偶尔靠近/远离
+      // 修复：先合成期望方向再调用 _moveWithAvoidance，避免调用后覆盖避障结果
       const sideSign = this._personality > 0.5 ? 1 : -1;
-      // 偶尔切换 strafe 方向（每 2-4 秒）
       const strafeFlip = Math.floor(this.stateTimer / (2 + this._personality * 2)) % 2 === 0;
       const finalSign = strafeFlip ? sideSign : -sideSign;
       const sideDir = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(finalSign);
-      this._moveWithAvoidance(sideDir, 2.5, delta);
-
       // 30% 概率在 strafe 时也轻微靠近/远离（增加运动不可预测性）
+      // 注意：必须在调用 _moveWithAvoidance 之前合成，否则会覆盖避障结果
+      let desiredDir = sideDir;
       if (Math.random() < 0.3) {
         const approachSign = distToPlayer > 18 ? 1 : -1;
-        this._moveDir.addScaledVector(dir, approachSign * 0.3).normalize();
+        desiredDir = sideDir.clone().addScaledVector(dir, approachSign * 0.3).normalize();
       }
+      this._moveWithAvoidance(desiredDir, 2.5, delta);
     }
 
     // ---- 射击 ----
@@ -1744,80 +1921,142 @@ export class EnemyAI {
   }
 
   /**
-   * 带避障的移动：在期望方向上前进，遇到墙壁时自动绕行
-   * 算法：
-   *  1) 沿期望方向发射 2m 前向探测射线
-   *  2) 若被堵，向左右各 30° 发射探测射线，选择更通畅方向
-   *  3) 应用加速度模型平滑移动（避免瞬间启停）
-   *  4) 每帧最多做一次避障检测（已由调用频率保证）
+   * 带避障的移动 v2：扇形多射线 + 沿墙绕行 + 卡住检测
+   * --------------------------------------------------------------
+   * 算法改进：
+   *  1) 扇形 7 射线探测：前向 + 左右 30°/60°/90°，找到最通畅且最接近期望方向的方向
+   *  2) 沿墙绕行：当前方和侧方都堵时，沿墙壁切线方向移动（右手/左手定则）
+   *  3) 卡住检测：连续 0.5 秒位置几乎未变但有移动意图时，强制反向避障
+   *  4) 每帧检测（无节流），高速时也能及时避障
+   *  5) 加速度模型 + 阻尼，避免瞬间启停
+   *
    * @param {THREE.Vector3} desiredDir 期望移动方向（已归一化）
    * @param {number} speed 目标速度
-   * @param {number} delta
+   * @param {number} delta 帧时间
    * @private
    */
   _moveWithAvoidance(desiredDir, speed, delta) {
-    // ---- 避障检测（每 0.1 秒一次，节流） ----
-    const now = performance.now() / 1000;
-    if (now - this._lastAvoidCheck > 0.1) {
-      this._lastAvoidCheck = now;
-      const checkDist = 2.0;
-      const origin = new THREE.Vector3(
-        this.position.x,
-        this.position.y + 0.5,
-        this.position.z
+    // ---- 卡住检测 ----
+    // 记录当前位置，与上次比较，如果几乎未动但有移动意图，触发卡住恢复
+    if (!this._lastStuckPos) {
+      this._lastStuckPos = this.position.clone();
+      this._stuckTimer = 0;
+    } else {
+      const movedDist = Math.hypot(
+        this.position.x - this._lastStuckPos.x,
+        this.position.z - this._lastStuckPos.z
       );
-      const forwardRay = new THREE.Ray(origin, desiredDir);
-      const forwardHits = this.physics.raycastBoxes(forwardRay, checkDist);
-
-      if (forwardHits.length > 0 && forwardHits[0].distance < checkDist) {
-        // 前方有墙：检测左右两侧
-        const leftDir = new THREE.Vector3(
-          desiredDir.x * Math.cos(0.6) - desiredDir.z * Math.sin(0.6),
-          0,
-          desiredDir.x * Math.sin(0.6) + desiredDir.z * Math.cos(0.6)
-        );
-        const rightDir = new THREE.Vector3(
-          desiredDir.x * Math.cos(-0.6) - desiredDir.z * Math.sin(-0.6),
-          0,
-          desiredDir.x * Math.sin(-0.6) + desiredDir.z * Math.cos(-0.6)
-        );
-        const leftRay = new THREE.Ray(origin, leftDir);
-        const rightRay = new THREE.Ray(origin, rightDir);
-        const leftHits = this.physics.raycastBoxes(leftRay, checkDist);
-        const rightHits = this.physics.raycastBoxes(rightRay, checkDist);
-        const leftClear = leftHits.length === 0 || leftHits[0].distance >= checkDist;
-        const rightClear = rightHits.length === 0 || rightHits[0].distance >= checkDist;
-
-        if (leftClear && !rightClear) {
-          this._avoidSteer = -1;
-        } else if (rightClear && !leftClear) {
-          this._avoidSteer = 1;
-        } else if (leftClear && rightClear) {
-          // 两侧都通：选距离目标更近的一侧（这里用性格偏好）
-          this._avoidSteer = this._personality > 0.5 ? 1 : -1;
-        } else {
-          // 两侧都堵：保持当前转向（继续尝试）
-          this._avoidSteer = this._avoidSteer || 1;
+      if (movedDist < 0.05 && desiredDir.lengthSq() > 0.01) {
+        this._stuckTimer += delta;
+        // 卡住超过 0.4 秒：切换避障方向（v3 改进）
+        // - 之前无方向：随机选一个方向开始绕行
+        // - 之前有方向：反向切换（这次往另一侧绕，避免重复撞同一面墙）
+        if (this._stuckTimer > 0.4) {
+          this._avoidSteer = this._avoidSteer === 0
+            ? (Math.random() < 0.5 ? 1 : -1)
+            : -this._avoidSteer;
+          this._stuckTimer = 0;
+          this._lastStuckPos.copy(this.position);
+          // 长期卡住计数（v3 新增）：
+          // 8 秒内连续触发 3 次卡住恢复，说明当前路径走不通（如目标在墙后无通道）
+          // 由 _updatePatrol / _updateInvestigate 等调用方检查 _stuckRecoveryCount 决定是否放弃目标
+          const now = performance.now() / 1000;
+          if (now - this._lastStuckRecoveryTime > 8.0) {
+            // 超过 8 秒未触发：重置计数器
+            this._stuckRecoveryCount = 0;
+          }
+          this._stuckRecoveryCount++;
+          this._lastStuckRecoveryTime = now;
         }
       } else {
-        this._avoidSteer = 0;
+        this._stuckTimer = 0;
+        this._lastStuckPos.copy(this.position);
       }
     }
 
-    // ---- 计算实际移动方向（应用避障偏转） ----
-    let actualDir = desiredDir;
-    if (this._avoidSteer !== 0) {
-      const steerAngle = 0.6 * this._avoidSteer;
-      actualDir = new THREE.Vector3(
-        desiredDir.x * Math.cos(steerAngle) - desiredDir.z * Math.sin(steerAngle),
+    // ---- 扇形多射线避障检测 ----
+    // 探测距离：基础 2.5m，按速度动态扩展（速度越快看得越远）
+    const checkDist = 2.5;
+    const dynamicCheck = Math.max(1.5, checkDist + speed * 0.2);
+    const origin = new THREE.Vector3(
+      this.position.x,
+      this.position.y + 1.0,  // 与视线高度一致（_canSee 用 y+1.5，避障用 y+1.0 兼顾低位障碍）
+      this.position.z
+    );
+
+    // 扇形射线角度：前向 + 左右 30°/60°/90°
+    const angles = [-Math.PI/2, -Math.PI/3, -Math.PI/6, 0, Math.PI/6, Math.PI/3, Math.PI/2];
+    const rayResults = angles.map(a => {
+      const d = new THREE.Vector3(
+        desiredDir.x * Math.cos(a) - desiredDir.z * Math.sin(a),
         0,
-        desiredDir.x * Math.sin(steerAngle) + desiredDir.z * Math.cos(steerAngle)
+        desiredDir.x * Math.sin(a) + desiredDir.z * Math.cos(a)
       );
+      const ray = new THREE.Ray(origin, d);
+      const hits = this.physics.raycastBoxes(ray, dynamicCheck);
+      const dist = hits.length > 0 ? hits[0].distance : dynamicCheck;
+      return { angle: a, dir: d, dist, clear: dist >= dynamicCheck };
+    });
+
+    // ---- 决定实际移动方向 ----
+    // v3 重写：当 bestDir 已选择垂直绕行方向时，必须真正使用 bestDir，
+    //         而非用 desiredDir + 小角度 sideSteer（旧逻辑会让 AI 仍朝墙走，导致墙边震荡卡死）
+    const forwardClear = rayResults[3].clear;  // 中间射线 = 前向（desiredDir 方向）
+    let actualDir;
+
+    if (forwardClear) {
+      // 前方通畅：直接走期望方向，清零避障状态
+      // 注意：直接置零而非 lerp 衰减，避免浮点精度残留（lerp 永远不到 0）
+      actualDir = desiredDir.clone();
+      this._avoidSteer = 0;
+    } else {
+      // 前方有墙：需要绕行
+      // 若未确定绕行侧，根据最佳角度选择（取符号）
+      if (this._avoidSteer === 0) {
+        // 评分：通畅距离 - |角度|*0.5（角度越大扣分越多，但通畅距离是主要因素）
+        let bestScore = -Infinity;
+        let bestAngle = 0;
+        for (const r of rayResults) {
+          const score = r.dist - Math.abs(r.angle) * 0.5;
+          if (score > bestScore) {
+            bestScore = score;
+            bestAngle = r.angle;
+          }
+        }
+        this._avoidSteer = Math.sign(bestAngle) || 1;
+      }
+
+      // 在 _avoidSteer 同侧选最通畅方向（优先 30°，其次 60°，最后 90°）
+      // 同侧扫描确保 AI 持续沿墙绕行，不会左右摇摆
+      const sign = this._avoidSteer;
+      const sideCandidates = rayResults.filter(r =>
+        Math.sign(r.angle) === sign && r.angle !== 0
+      );
+      // 评分 = dist（同侧时优先通畅距离，角度已在选 side 时确定）
+      let sideBest = sideCandidates[0] || rayResults[0];
+      for (const r of sideCandidates) {
+        if (r.dist > sideBest.dist) sideBest = r;
+      }
+      actualDir = sideBest.dir.clone();
+
+      // 死角处理：所有方向都不通，选通畅距离最大的方向（哪怕角度大）
+      const allBlocked = rayResults.every(r => !r.clear);
+      if (allBlocked) {
+        let maxDist = 0;
+        let maxDir = desiredDir;
+        for (const r of rayResults) {
+          if (r.dist > maxDist) {
+            maxDist = r.dist;
+            maxDir = r.dir;
+          }
+        }
+        actualDir = maxDir.clone();
+      }
     }
 
     // ---- 加速度模型：当前速度向目标速度插值 ----
     const targetVel = actualDir.clone().multiplyScalar(speed);
-    const accel = this.state === 'engage' ? 8.0 : 5.0; // 交战时加速更快
+    const accel = this.state === 'engage' ? 8.0 : 5.0;
     this.velocity.x = THREE.MathUtils.lerp(this.velocity.x, targetVel.x, Math.min(1, accel * delta));
     this.velocity.z = THREE.MathUtils.lerp(this.velocity.z, targetVel.z, Math.min(1, accel * delta));
 
@@ -2012,9 +2251,9 @@ export class EnemyAI {
 
     // 视线方向
     const dir = new THREE.Vector3().subVectors(player.position, this.position).normalize();
+    // 正向向量：group.rotation.y = yaw 时，正面朝向 +Z 是 yaw=0，朝向 +X 是 yaw=PI/2
+    // 所以 forward = (sin(yaw), 0, cos(yaw))，与人体正面（+Z）和武器枪口（+Z，已翻转）一致
     const forward = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    // 注意：group.rotation.y = yaw 时，正面朝向 +Z 是 yaw=0，朝向 +X 是 yaw=PI/2
-    // 实际朝向：forward = (sin(yaw), 0, cos(yaw))？需校验
     // 这里给 AI 较宽广的视野（180°）
     const dot = dir.dot(forward);
     if (dot < -0.3) return false; // 在背后
@@ -2167,6 +2406,12 @@ export class EnemyAI {
     this._avoidSteer = 0;
     this._retreatCooldownUntil = 0;
     this._retreatArriveTime = -1;
+    // v2 新增：卡住检测状态重置
+    if (this._lastStuckPos) this._lastStuckPos.copy(this.position);
+    this._stuckTimer = 0;
+    // v3 新增：长期卡住计数重置
+    this._stuckRecoveryCount = 0;
+    this._lastStuckRecoveryTime = 0;
 
     // ---- 重置动画状态 ----
     this._walkPhase = 0;
@@ -2176,6 +2421,14 @@ export class EnemyAI {
     this._deathStage = 0;
     this._deathElapsed = 0;
     this._deathFallDir = 0;       // v2 新增
+    // v3 新增：物理倒地状态清理
+    if (this._ragdollAngularVel) this._ragdollAngularVel.set(0, 0, 0);
+    this._ragdollSettled = false;
+    if (this._jointAngVel) {
+      for (const k in this._jointAngVel) {
+        this._jointAngVel[k].set(0, 0, 0);
+      }
+    }
     this._lastSpeed = 0;
     this.muzzleFlashEndTime = 0;
     this._nextIdleAdjust = 0;     // v2 新增
@@ -2204,8 +2457,9 @@ export class EnemyAI {
     if (this.leftElbowGroup) this.leftElbowGroup.rotation.set(0, 0, 0);
     if (this.rightElbowGroup) this.rightElbowGroup.rotation.set(0, 0, 0);
     // 武器组复位（含 position.y，v2 新增，避免换弹动画残留位置）
+    // 修复：保留 rotation.y = π（武器朝向翻转），只重置 x/z
     if (this.weaponGroup) {
-      this.weaponGroup.rotation.set(0, 0, 0);
+      this.weaponGroup.rotation.set(0, Math.PI, 0);
       this.weaponGroup.position.set(0, -0.30, -0.10);
     }
     if (this.leftLegGroup) this.leftLegGroup.rotation.set(0, 0, 0);

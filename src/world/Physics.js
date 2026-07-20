@@ -72,15 +72,20 @@ export class Physics {
    *  3) 推动方向参考"玩家中心相对箱子中心的位置"，确保玩家被推到最近的边外
    *     （比"最小渗透轴"更直观，且对玩家完全嵌入场景也有效）
    *  4) 多箱子同时碰撞时，累加各轴推力并取绝对值最大者，防止互相抵消
+   * 改进（v2）：返回碰撞反馈对象 {pos, collided, normal}，让 AI 能感知撞墙并作出反应
    * @param {THREE.Vector3} pos 玩家脚部位置（会被原地修改）
    * @param {number} radius 玩家半径
    * @param {number} height 玩家高度
-   * @returns {THREE.Vector3} 调整后的位置
+   * @returns {{pos:THREE.Vector3, collided:boolean, normal:THREE.Vector3}} 调整后的位置 + 碰撞信息
    */
   resolve(pos, radius, height) {
     // 复用临时变量，避免每帧 GC
     const pMin = this._tmpMin || (this._tmpMin = new THREE.Vector3());
     const pMax = this._tmpMax || (this._tmpMax = new THREE.Vector3());
+
+    // 碰撞反馈：累加所有推动方向的法线（归一化后表示"墙的推开方向"）
+    let collided = false;
+    let netNormalX = 0, netNormalZ = 0;
 
     for (let iter = 0; iter < 6; iter++) {
       let anyCollision = false;
@@ -101,6 +106,7 @@ export class Physics {
         if (pMax.z <= box.min.z || pMin.z >= box.max.z) continue;
 
         anyCollision = true;
+        collided = true;
 
         const overlapX1 = box.max.x - pMin.x;  // 推 -X（玩家向左退）
         const overlapX2 = pMax.x - box.min.x;  // 推 +X（玩家向右退）
@@ -148,8 +154,11 @@ export class Physics {
         if (Math.abs(pushXDelta) <= Math.abs(pushZDelta)) {
           // 推 X 方向
           if (Math.abs(pushXDelta) > Math.abs(netPushX)) netPushX = pushXDelta;
+          // 累加碰撞法线（推力方向 = 法线方向）
+          netNormalX += Math.sign(pushXDelta);
         } else {
           if (Math.abs(pushZDelta) > Math.abs(netPushZ)) netPushZ = pushZDelta;
+          netNormalZ += Math.sign(pushZDelta);
         }
       }
 
@@ -176,7 +185,17 @@ export class Physics {
     // ---- 地面 ----
     if (pos.y < this.groundY) pos.y = this.groundY;
 
-    return pos;
+    // ---- 返回碰撞反馈 ----
+    // 法线归一化（如果没碰撞则为零向量）
+    const normalLen = Math.sqrt(netNormalX * netNormalX + netNormalZ * netNormalZ);
+    const normal = this._tmpNormal || (this._tmpNormal = new THREE.Vector3());
+    if (normalLen > 0.001) {
+      normal.set(netNormalX / normalLen, 0, netNormalZ / normalLen);
+    } else {
+      normal.set(0, 0, 0);
+    }
+
+    return { pos, collided, normal };
   }
 
   /**
