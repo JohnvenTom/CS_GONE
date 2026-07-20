@@ -982,6 +982,10 @@ export class Game {
       // 冻结时间 AI 也站着不动
       for (const bot of this.allBots) {
         bot.state = 'idle';
+        // 死亡的 bot 继续播放死亡动画（修复：回合结束后死亡动画应完整播放）
+        if (!bot.isAlive) {
+          bot.update(delta, null, this.allBots);
+        }
       }
     }
 

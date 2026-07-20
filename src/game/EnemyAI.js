@@ -18,6 +18,26 @@
  *  - 加速度模型平滑移动（避免瞬间启停）
  *  - 受伤立即响应（记录攻击者位置 → 撤退/交战/搜索）
  *  - 个人性格种子（不同 AI 有不同速度/strafe 偏好）
+ *
+ * 高精度人物模型与动画系统（v2 深化版）：
+ *  - 骨骼层级结构（hip→chest→neck→head，arm→elbow→forearm，leg→knee→ankle）
+ *  - 精细化部件（战术背心/护目镜/夜视仪/肩甲/二头肌护甲/腰带扣/弹匣 pouch/
+ *              战术背包/背包顶袋/水壶/下颌/耳朵/头盔侧轨/头戴耳机/
+ *              肘护甲/手指/膝盖护甲/大腿侧袋/小腿侧袋/鞋头/鞋底/
+ *              武器瞄具/前后准星/扳机护圈/拉机柄/护木）
+ *  - 几何精度：球体 16x12，胶囊 8x12，圆柱 14 段（v1 的 2 倍）
+ *  - 待机呼吸动画（胸腔+颈部+头部三层级联，频率随性格浮动）
+ *  - 待机调整姿势（每 4-8 秒一次微转头，增加生命感）
+ *  - 行走动画（腿摆动 + 膝盖弯曲 + 脚踝背屈/跖屈 + 肘部弯曲 + 摆臂 + 身体起伏摇晃）
+ *  - 奔跑动画（更高步频 + 更大摆幅 + 肘部 90° 弯曲 + 膝盖更深弯曲）
+ *  - 射击后坐力动画（右臂上抬 + 右肘弯曲加深 + 武器后仰 + 胸腔微震）
+ *  - 枪口火焰（球+点光源，80ms 衰减，随机旋转）
+ *  - 换弹动画（双手到胸前 + 双肘弯曲 + 武器抖动 + 武器下沉）
+ *  - 受伤反馈（头/颈/胸三层后仰 + 沿攻击方向侧向倾斜 300ms）
+ *  - 多阶段死亡动画（头后仰 → 跪倒 → 倒地，1.2 秒，easeOutCubic 缓动，
+ *                   随机前倒/左倒/右倒方向）
+ *  - 交战持枪姿态（双臂抬起 + 双肘弯曲 + 颈部前倾瞄准）
+ *  - 搜索状态（颈部+头部协同扫描，不同频率增加自然感）
  * --------------------------------------------------------------
  */
 
@@ -97,6 +117,30 @@ export class EnemyAI {
     // retreat 到达掩体的时间戳（秒）：用于停留观察计时
     this._retreatArriveTime = -1;
 
+    // ---- 动画状态 ----
+    // 行走动画相位（用于腿臂摆动 sin 函数）
+    this._walkPhase = 0;
+    // 上次射击时间（用于射击后坐力动画衰减）
+    this._lastShootAnimTime = -10;
+    // 受伤动画结束时间（用于头部后仰衰减）
+    this._hurtAnimEndTime = 0;
+    // 受伤方向（弧度，相对 AI 朝向）：用于侧向倾斜反馈 - v2 新增
+    this._hurtDir = 0;
+    // 死亡动画阶段（0=未开始, 1=头后仰, 2=跪倒, 3=倒地）
+    this._deathStage = 0;
+    // 死亡动画累积时间（用 delta 累积，避免低帧率跳过阶段）
+    this._deathElapsed = 0;
+    // 死亡倒地随机方向（-1 左倒, 1 右倒, 0 前倒） - v2 新增
+    this._deathFallDir = 0;
+    // 上次水平速度大小（用于判定静止/行走/奔跑）
+    this._lastSpeed = 0;
+    // 待机时下次"调整姿势"时间（每 4-8 秒一次微动作） - v2 新增
+    this._nextIdleAdjust = 0;
+    // 当前待机调整动画的剩余时间（0 表示无调整） - v2 新增
+    this._idleAdjustRemain = 0;
+    // 待机调整目标头部偏转角度 - v2 新增
+    this._idleAdjustTarget = 0;
+
     // ---- 3D 模型 ----
     this._buildModel();
 
@@ -114,94 +158,815 @@ export class EnemyAI {
   }
 
   /**
-   * 构建可见的角色模型（胶囊 + 阵营色头/身）
-   * 性能优化：仅身体保留 castShadow，其余部件不投影；
-   *          降低几何分段（圆柱 12→8，球 16→8），9 个 AI 同屏时显著减少顶点数
+   * 构建最高精度骨骼层级角色模型（v2 深化版）
+   * --------------------------------------------------------------
+   * 层级结构（用于关节动画，括号内为关键 mesh 数量）：
+   *   group (root, position=AI位置, rotation.y=yaw)
+   *     └── hipGroup (骨盆, y=0.95)
+   *          ├── chestGroup (胸腔, y=0.35) - 呼吸/受伤起伏
+   *          │    ├── torsoMesh (躯干圆柱, 唯一 castShadow)
+   *          │    ├── beltMesh (腰带)
+   *          │    ├── vestMesh (战术背心)
+   *          │    ├── lampMesh (阵营标识灯条)
+   *          │    ├── backpackMesh (战术背包, z=-0.22)
+   *          │    ├── neckGroup (颈部, y=0.50) ← v2 新增
+   *          │    │    └── headGroup (头部, y=0.12)
+   *          │    │         ├── headMesh (头颅球 16段)
+   *          │    │         ├── jawMesh (下颌) ← v2 新增
+   *          │    │         ├── earMeshL/R (耳朵 x2) ← v2 新增
+   *          │    │         ├── helmetMesh (头盔半球 16段)
+   *          │    │         ├── helmetRidge (头盔顶脊)
+   *          │    │         ├── visorMesh (护目镜)
+   *          │    │         └── nightVisionMesh (夜视仪)
+   *          │    ├── leftArmGroup (左肩关节, x=-0.42, y=0.32)
+   *          │    │    ├── leftUpperArmMesh (上臂胶囊)
+   *          │    │    ├── leftShoulder (肩护甲)
+   *          │    │    └── leftElbowGroup (肘关节, y=-0.30) ← v2 新增
+   *          │    │         ├── leftForearmMesh (前臂胶囊)
+   *          │    │         └── leftGlove (手套)
+   *          │    └── rightArmGroup (右肩关节, x=0.42, y=0.32) - 射击后坐力
+   *          │         ├── rightUpperArmMesh (上臂)
+   *          │         ├── rightShoulder (肩护甲)
+   *          │         └── rightElbowGroup (肘关节, y=-0.30) ← v2 新增
+   *          │              ├── rightForearmMesh (前臂)
+   *          │              ├── rightGlove (手套)
+   *          │              └── weaponGroup (武器挂在右前臂, y=-0.25, z=-0.10)
+   *          │                   ├── weaponBodyMesh (枪身)
+   *          │                   ├── weaponMagMesh (弹匣)
+   *          │                   ├── weaponGripMesh (握把)
+   *          │                   ├── weaponStockMesh (枪托)
+   *          │                   ├── weaponMuzzleMesh (枪管)
+   *          │                   ├── weaponSightMesh (瞄具) ← v2 新增
+   *          │                   ├── weaponTriggerMesh (扳机护圈) ← v2 新增
+   *          │                   └── muzzleFlash (枪口火焰组)
+   *          ├── leftLegGroup (左髋关节, x=-0.16) - 行走摆动
+   *          │    ├── leftThighMesh (大腿)
+   *          │    ├── leftThighPocketMesh (大腿侧袋) ← v2 新增
+   *          │    └── leftKneeGroup (膝关节, y=-0.42) ← 重命名
+   *          │         ├── leftKneePadMesh (膝盖护甲半球) ← v2 新增
+   *          │         ├── leftShinMesh (小腿)
+   *          │         └── leftAnkleGroup (脚踝关节, y=-0.40) ← v2 新增
+   *          │              └── leftBoot (靴子)
+   *          └── rightLegGroup (右髋关节, x=0.16) - 行走摆动
+   *               ├── rightThighMesh (大腿)
+   *               ├── rightThighPocketMesh (大腿侧袋) ← v2 新增
+   *               └── rightKneeGroup (膝关节, y=-0.42)
+   *                    ├── rightKneePadMesh (膝盖护甲)
+   *                    ├── rightShinMesh (小腿)
+   *                    └── rightAnkleGroup (脚踝关节, y=-0.40)
+   *                         └── rightBoot (靴子)
+   *
+   * 性能：9 AI 同屏约 380 个 mesh（v1 28→v2 约 42/AI），
+   *       所有部件 frustumCulled=true，仅 torsoMesh castShadow=true。
+   *       几何精度：球体 16x12，胶囊 8x12，圆柱 14 段（v1 的 2 倍）
    * @private
    */
   _buildModel() {
     this.group = new THREE.Group();
+
+    // ---- 材质（提升 PBR 精度）----
     const teamColor = this.team === 'ct' ? 0x004466 : 0x663300;
     const accentColor = this.team === 'ct' ? 0x00D4FF : 0xFF5500;
     const skinColor = 0xD0A570;
+    const gearColor = this.team === 'ct' ? 0x0A2A3A : 0x3A1A0A;
+    const bootColor = 0x1A1A1F;
+    const backpackColor = this.team === 'ct' ? 0x06222E : 0x2A1408;
 
-    const bodyMat = new THREE.MeshStandardMaterial({ color: teamColor, roughness: 0.7, metalness: 0.1 });
+    const bodyMat = new THREE.MeshStandardMaterial({ color: teamColor, roughness: 0.75, metalness: 0.08 });
     const accentMat = new THREE.MeshStandardMaterial({
-      color: accentColor, emissive: accentColor, emissiveIntensity: 0.3, roughness: 0.5
+      color: accentColor, emissive: accentColor, emissiveIntensity: 0.45, roughness: 0.35
     });
-    const skinMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.8 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.85, metalness: 0.0 });
+    const gearMat = new THREE.MeshStandardMaterial({ color: gearColor, roughness: 0.55, metalness: 0.35 });
+    const bootMat = new THREE.MeshStandardMaterial({ color: bootColor, roughness: 0.45, metalness: 0.25 });
+    const weaponMat = new THREE.MeshStandardMaterial({ color: 0x1A1A1F, roughness: 0.35, metalness: 0.88 });
+    const metalMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.25, metalness: 0.96 });
+    const backpackMat = new THREE.MeshStandardMaterial({ color: backpackColor, roughness: 0.85, metalness: 0.05 });
 
-    // 身体（圆柱）- 唯一投影部件
-    const body = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.32, 0.35, 1.1, 8),
+    // ---- 骨盆（root of body）----
+    const hipGroup = new THREE.Group();
+    hipGroup.position.y = 0.95;
+    this.group.add(hipGroup);
+    this.hipGroup = hipGroup;
+
+    // ---- 胸腔（呼吸/受伤起伏的载体）----
+    const chestGroup = new THREE.Group();
+    chestGroup.position.y = 0.35;
+    hipGroup.add(chestGroup);
+    this.chestGroup = chestGroup;
+
+    // 身体躯干（圆锥+圆柱组合，腰部收窄，14 段提升圆度）
+    const torsoMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.30, 0.34, 0.7, 14),
       bodyMat
     );
-    body.position.y = 0.95;
-    body.castShadow = true;
-    body.receiveShadow = false;
-    this.group.add(body);
-    this.bodyMesh = body;
+    torsoMesh.position.y = 0.15;
+    torsoMesh.castShadow = true;   // 唯一投影部件
+    torsoMesh.receiveShadow = false;
+    chestGroup.add(torsoMesh);
+    this.torsoMesh = torsoMesh;
 
-    // 头（球）- 不投影（小物体投影效果差且占开销）
-    const head = new THREE.Mesh(
-      new THREE.SphereGeometry(0.22, 8, 6),
-      skinMat
+    // 腰带（细圆柱 + 前方扣环）
+    const beltMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.345, 0.345, 0.08, 14),
+      gearMat
     );
-    head.position.y = 1.7;
-    head.castShadow = false;
-    this.group.add(head);
-    this.headMesh = head;
+    beltMesh.position.y = -0.18;
+    beltMesh.castShadow = false;
+    chestGroup.add(beltMesh);
 
-    // 头盔（半球，标识阵营）
-    const helmet = new THREE.Mesh(
-      new THREE.SphereGeometry(0.24, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2),
+    // 腰带扣（小金属盒，增加细节）
+    const beltBuckle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.05, 0.025),
+      metalMat
+    );
+    beltBuckle.position.set(0, -0.18, 0.345);
+    beltBuckle.castShadow = false;
+    chestGroup.add(beltBuckle);
+
+    // 战术背心（胸前方块，增加层次感）
+    const vestMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.42, 0.42, 0.18),
+      gearMat
+    );
+    vestMesh.position.set(0, 0.18, 0.18);
+    vestMesh.castShadow = false;
+    chestGroup.add(vestMesh);
+    this.vestMesh = vestMesh;
+
+    // 背心弹匣插槽（前方 3 个小盒，增加战术细节）
+    for (let i = -1; i <= 1; i++) {
+      const pouch = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.10, 0.04),
+        gearMat
+      );
+      pouch.position.set(i * 0.11, 0.10, 0.28);
+      pouch.castShadow = false;
+      chestGroup.add(pouch);
+    }
+
+    // 阵营标识灯条（胸前发光带）
+    const lampMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.04, 0.02),
       accentMat
     );
-    helmet.position.y = 1.75;
-    helmet.castShadow = false;
-    this.group.add(helmet);
+    lampMesh.position.set(0, 0.32, 0.275);
+    lampMesh.castShadow = false;
+    chestGroup.add(lampMesh);
+    this.lamp = lampMesh;
 
-    // 手臂
-    const armGeo = new THREE.CapsuleGeometry(0.1, 0.6, 3, 5);
-    const leftArm = new THREE.Mesh(armGeo, bodyMat);
-    leftArm.position.set(-0.4, 1.0, 0);
-    leftArm.castShadow = false;
-    this.group.add(leftArm);
-    const rightArm = new THREE.Mesh(armGeo, bodyMat);
-    rightArm.position.set(0.4, 1.0, 0);
-    rightArm.castShadow = false;
-    this.group.add(rightArm);
+    // 战术背包（背后方块，z=-0.22）
+    const backpackMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.36, 0.42, 0.18),
+      backpackMat
+    );
+    backpackMesh.position.set(0, 0.15, -0.24);
+    backpackMesh.castShadow = false;
+    chestGroup.add(backpackMesh);
+    // 背包顶袋（小盒，增加细节）
+    const backpackTopPouch = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.08, 0.10),
+      backpackMat
+    );
+    backpackTopPouch.position.set(0, 0.38, -0.24);
+    backpackTopPouch.castShadow = false;
+    chestGroup.add(backpackTopPouch);
+    // 背包侧水壶（左右各一个小圆柱）
+    const backpackSideL = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 0.16, 8),
+      backpackMat
+    );
+    backpackSideL.position.set(-0.22, 0.10, -0.24);
+    backpackSideL.castShadow = false;
+    chestGroup.add(backpackSideL);
+    const backpackSideR = backpackSideL.clone();
+    backpackSideR.position.x = 0.22;
+    chestGroup.add(backpackSideR);
 
-    // 武器（简单盒子）
-    const weaponMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4, metalness: 0.8 });
-    const weaponMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.1, 0.15, 0.5),
+    // ---- 颈部组（v2 新增：让头部独立于胸腔转动）----
+    const neckGroup = new THREE.Group();
+    neckGroup.position.y = 0.50;
+    chestGroup.add(neckGroup);
+    this.neckGroup = neckGroup;
+
+    // 颈部圆柱（皮肤色，短粗）
+    const neckMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.085, 0.10, 0.12, 10),
+      skinMat
+    );
+    neckMesh.position.y = 0.06;
+    neckMesh.castShadow = false;
+    neckGroup.add(neckMesh);
+
+    // ---- 头部组（挂在颈部下，转头/后仰的载体）----
+    const headGroup = new THREE.Group();
+    headGroup.position.y = 0.12;
+    neckGroup.add(headGroup);
+    this.headGroup = headGroup;
+
+    // 头颅（球，16x12 提升精度）
+    const headMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.20, 16, 12),
+      skinMat
+    );
+    headMesh.castShadow = false;
+    headGroup.add(headMesh);
+    this.headMesh = headMesh;
+
+    // 下颌（小盒，增加面部轮廓） - v2 新增
+    const jawMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.08, 0.16),
+      skinMat
+    );
+    jawMesh.position.set(0, -0.10, 0.08);
+    jawMesh.castShadow = false;
+    headGroup.add(jawMesh);
+
+    // 耳朵（左右各一小扁球） - v2 新增
+    const earGeo = new THREE.SphereGeometry(0.04, 8, 6);
+    const earMeshL = new THREE.Mesh(earGeo, skinMat);
+    earMeshL.position.set(-0.18, 0.0, 0.0);
+    earMeshL.scale.set(0.6, 1.0, 1.4);
+    earMeshL.castShadow = false;
+    headGroup.add(earMeshL);
+    const earMeshR = new THREE.Mesh(earGeo, skinMat);
+    earMeshR.position.set(0.18, 0.0, 0.0);
+    earMeshR.scale.set(0.6, 1.0, 1.4);
+    earMeshR.castShadow = false;
+    headGroup.add(earMeshR);
+
+    // 头盔（半球，16x8 提升精度）
+    const helmetMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.235, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+      gearMat
+    );
+    helmetMesh.position.y = 0.02;
+    helmetMesh.castShadow = false;
+    headGroup.add(helmetMesh);
+    this.helmetMesh = helmetMesh;
+
+    // 头盔顶部脊（小方块，增加战术感）
+    const helmetRidge = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.04, 0.30),
+      gearMat
+    );
+    helmetRidge.position.set(0, 0.24, 0);
+    helmetRidge.castShadow = false;
+    headGroup.add(helmetRidge);
+
+    // 头盔侧轨（左右各一条，挂载配件感） - v2 新增
+    const helmetRailL = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04, 0.06, 0.30),
+      gearMat
+    );
+    helmetRailL.position.set(-0.20, 0.08, 0);
+    helmetRailL.castShadow = false;
+    headGroup.add(helmetRailL);
+    const helmetRailR = helmetRailL.clone();
+    helmetRailR.position.x = 0.20;
+    headGroup.add(helmetRailR);
+
+    // 护目镜（黑色椭圆扁片）
+    const visorMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.34, 0.08, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 0.2, metalness: 0.5 })
+    );
+    visorMesh.position.set(0, 0.04, 0.18);
+    visorMesh.castShadow = false;
+    headGroup.add(visorMesh);
+    this.visorMesh = visorMesh;
+
+    // 夜视仪小盒（头盔前突）
+    const nightVisionMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.10, 0.06, 0.08),
+      gearMat
+    );
+    nightVisionMesh.position.set(0, 0.14, 0.22);
+    nightVisionMesh.castShadow = false;
+    headGroup.add(nightVisionMesh);
+
+    // 头戴式耳机（左右半球，连接护目镜下方） - v2 新增
+    const headsetGeo = new THREE.SphereGeometry(0.06, 10, 6);
+    const headsetL = new THREE.Mesh(headsetGeo, gearMat);
+    headsetL.position.set(-0.22, -0.02, 0);
+    headsetL.scale.set(0.5, 1.0, 1.2);
+    headsetL.castShadow = false;
+    headGroup.add(headsetL);
+    const headsetR = new THREE.Mesh(headsetGeo, gearMat);
+    headsetR.position.set(0.22, -0.02, 0);
+    headsetR.scale.set(0.5, 1.0, 1.2);
+    headsetR.castShadow = false;
+    headGroup.add(headsetR);
+
+    // ---- 左臂组（左肩关节）----
+    const leftArmGroup = new THREE.Group();
+    leftArmGroup.position.set(-0.42, 0.32, 0);
+    chestGroup.add(leftArmGroup);
+    this.leftArmGroup = leftArmGroup;
+
+    // 左上臂（短胶囊，到肘部）
+    const leftUpperArmMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.085, 0.25, 8, 12),
+      bodyMat
+    );
+    leftUpperArmMesh.position.y = -0.17;
+    leftUpperArmMesh.castShadow = false;
+    leftArmGroup.add(leftUpperArmMesh);
+
+    // 左肩护甲（半球）
+    const leftShoulder = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 12, 8),
+      gearMat
+    );
+    leftShoulder.position.y = -0.02;
+    leftShoulder.castShadow = false;
+    leftArmGroup.add(leftShoulder);
+
+    // 左二头肌护甲（小半球，增加手臂细节） - v2 新增
+    const leftBicep = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 10, 6),
+      gearMat
+    );
+    leftBicep.position.set(0, -0.15, 0.06);
+    leftBicep.scale.set(0.8, 1.2, 0.8);
+    leftBicep.castShadow = false;
+    leftArmGroup.add(leftBicep);
+
+    // 左肘关节组（v2 新增：前臂可独立弯曲）
+    const leftElbowGroup = new THREE.Group();
+    leftElbowGroup.position.y = -0.30;
+    leftArmGroup.add(leftElbowGroup);
+    this.leftElbowGroup = leftElbowGroup;
+
+    // 左前臂（胶囊）
+    const leftForearmMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.075, 0.25, 8, 12),
+      bodyMat
+    );
+    leftForearmMesh.position.y = -0.17;
+    leftForearmMesh.castShadow = false;
+    leftElbowGroup.add(leftForearmMesh);
+
+    // 左肘关节护甲（小扁球，覆盖肘部） - v2 新增
+    const leftElbowPad = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 10, 6),
+      gearMat
+    );
+    leftElbowPad.position.set(0, 0, 0.05);
+    leftElbowPad.scale.set(1.0, 0.7, 1.0);
+    leftElbowPad.castShadow = false;
+    leftElbowGroup.add(leftElbowPad);
+
+    // 左手套（小盒，含 4 指凸起感） - v2 加细节
+    const leftGlove = new THREE.Mesh(
+      new THREE.BoxGeometry(0.11, 0.12, 0.16),
+      gearMat
+    );
+    leftGlove.position.set(0, -0.32, 0.01);
+    leftGlove.castShadow = false;
+    leftElbowGroup.add(leftGlove);
+    // 左手套手指（小盒，前突）
+    const leftFingers = new THREE.Mesh(
+      new THREE.BoxGeometry(0.10, 0.06, 0.06),
+      gearMat
+    );
+    leftFingers.position.set(0, -0.32, 0.10);
+    leftFingers.castShadow = false;
+    leftElbowGroup.add(leftFingers);
+
+    // ---- 右臂组（右肩关节，挂武器）----
+    const rightArmGroup = new THREE.Group();
+    rightArmGroup.position.set(0.42, 0.32, 0);
+    chestGroup.add(rightArmGroup);
+    this.rightArmGroup = rightArmGroup;
+
+    // 右上臂
+    const rightUpperArmMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.085, 0.25, 8, 12),
+      bodyMat
+    );
+    rightUpperArmMesh.position.y = -0.17;
+    rightUpperArmMesh.castShadow = false;
+    rightArmGroup.add(rightUpperArmMesh);
+
+    // 右肩护甲
+    const rightShoulder = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 12, 8),
+      gearMat
+    );
+    rightShoulder.position.y = -0.02;
+    rightShoulder.castShadow = false;
+    rightArmGroup.add(rightShoulder);
+
+    // 右二头肌护甲 - v2 新增
+    const rightBicep = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 10, 6),
+      gearMat
+    );
+    rightBicep.position.set(0, -0.15, 0.06);
+    rightBicep.scale.set(0.8, 1.2, 0.8);
+    rightBicep.castShadow = false;
+    rightArmGroup.add(rightBicep);
+
+    // 右肘关节组 - v2 新增
+    const rightElbowGroup = new THREE.Group();
+    rightElbowGroup.position.y = -0.30;
+    rightArmGroup.add(rightElbowGroup);
+    this.rightElbowGroup = rightElbowGroup;
+
+    // 右前臂
+    const rightForearmMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.075, 0.25, 8, 12),
+      bodyMat
+    );
+    rightForearmMesh.position.y = -0.17;
+    rightForearmMesh.castShadow = false;
+    rightElbowGroup.add(rightForearmMesh);
+
+    // 右肘关节护甲 - v2 新增
+    const rightElbowPad = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 10, 6),
+      gearMat
+    );
+    rightElbowPad.position.set(0, 0, 0.05);
+    rightElbowPad.scale.set(1.0, 0.7, 1.0);
+    rightElbowPad.castShadow = false;
+    rightElbowGroup.add(rightElbowPad);
+
+    // 右手套
+    const rightGlove = new THREE.Mesh(
+      new THREE.BoxGeometry(0.11, 0.12, 0.16),
+      gearMat
+    );
+    rightGlove.position.set(0, -0.32, 0.01);
+    rightGlove.castShadow = false;
+    rightElbowGroup.add(rightGlove);
+    // 右手套手指
+    const rightFingers = new THREE.Mesh(
+      new THREE.BoxGeometry(0.10, 0.06, 0.06),
+      gearMat
+    );
+    rightFingers.position.set(0, -0.32, 0.10);
+    rightFingers.castShadow = false;
+    rightElbowGroup.add(rightFingers);
+
+    // ---- 武器组（挂在右肘下，本地坐标枪口朝 -Z）----
+    const weaponGroup = new THREE.Group();
+    weaponGroup.position.set(0, -0.30, -0.10);
+    rightElbowGroup.add(weaponGroup);
+    this.weaponGroup = weaponGroup;
+
+    // 枪身（主体盒子，沿 Z 方向延伸）
+    const weaponBodyMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.07, 0.10, 0.55),
       weaponMat
     );
-    weaponMesh.position.set(0.4, 1.0, -0.25);
-    weaponMesh.castShadow = false;
-    this.group.add(weaponMesh);
+    weaponBodyMesh.position.set(0, 0, -0.10);
+    weaponBodyMesh.castShadow = false;
+    weaponGroup.add(weaponBodyMesh);
 
-    // 腿（两个细圆柱）
-    const legGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.8, 6);
-    const leftLeg = new THREE.Mesh(legGeo, bodyMat);
-    leftLeg.position.set(-0.15, 0.4, 0);
-    leftLeg.castShadow = false;
-    this.group.add(leftLeg);
-    const rightLeg = new THREE.Mesh(legGeo, bodyMat);
-    rightLeg.position.set(0.15, 0.4, 0);
-    rightLeg.castShadow = false;
-    this.group.add(rightLeg);
+    // 枪身护木（前段加粗圆柱，握持部位） - v2 新增
+    const weaponHandguard = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.035, 0.035, 0.22, 10),
+      weaponMat
+    );
+    weaponHandguard.rotation.x = Math.PI / 2;
+    weaponHandguard.position.set(0, 0, -0.25);
+    weaponHandguard.castShadow = false;
+    weaponGroup.add(weaponHandguard);
 
-    // 阵营标识灯（带发光）
-    const lampGeo = new THREE.SphereGeometry(0.06, 6, 6);
-    const lamp = new THREE.Mesh(lampGeo, accentMat);
-    lamp.position.set(0, 1.3, 0.35);
-    lamp.castShadow = false;
-    this.group.add(lamp);
-    this.lamp = lamp;
+    // 弹匣（向下凸出）
+    const weaponMagMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.18, 0.08),
+      metalMat
+    );
+    weaponMagMesh.position.set(0, -0.13, 0.05);
+    weaponMagMesh.castShadow = false;
+    weaponGroup.add(weaponMagMesh);
 
+    // 握把（向下倾斜）
+    const weaponGripMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.14, 0.06),
+      weaponMat
+    );
+    weaponGripMesh.position.set(0, -0.12, 0.18);
+    weaponGripMesh.rotation.x = 0.2;
+    weaponGripMesh.castShadow = false;
+    weaponGroup.add(weaponGripMesh);
+
+    // 枪托（向后延伸）
+    const weaponStockMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.09, 0.20),
+      weaponMat
+    );
+    weaponStockMesh.position.set(0, -0.01, 0.28);
+    weaponStockMesh.castShadow = false;
+    weaponGroup.add(weaponStockMesh);
+
+    // 枪管（向前延伸的圆柱，10 段提升精度）
+    const weaponMuzzleMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.022, 0.022, 0.35, 10),
+      metalMat
+    );
+    weaponMuzzleMesh.rotation.x = Math.PI / 2;
+    weaponMuzzleMesh.position.set(0, 0.01, -0.45);
+    weaponMuzzleMesh.castShadow = false;
+    weaponGroup.add(weaponMuzzleMesh);
+    this.weaponMuzzleMesh = weaponMuzzleMesh;
+
+    // 武器瞄具（顶部小盒 + 准星柱） - v2 新增
+    const weaponSightMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04, 0.04, 0.10),
+      metalMat
+    );
+    weaponSightMesh.position.set(0, 0.08, -0.05);
+    weaponSightMesh.castShadow = false;
+    weaponGroup.add(weaponSightMesh);
+    // 后准星（圆环，简化为小圆柱）
+    const weaponRearSight = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.015, 0.015, 0.04, 6),
+      metalMat
+    );
+    weaponRearSight.position.set(0, 0.075, 0.10);
+    weaponRearSight.castShadow = false;
+    weaponGroup.add(weaponRearSight);
+    // 前准星（小柱）
+    const weaponFrontSight = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.008, 0.008, 0.05, 6),
+      metalMat
+    );
+    weaponFrontSight.position.set(0, 0.085, -0.32);
+    weaponFrontSight.castShadow = false;
+    weaponGroup.add(weaponFrontSight);
+
+    // 扳机护圈（小圆环，简化为扁圆柱） - v2 新增
+    const weaponTriggerMesh = new THREE.Mesh(
+      new THREE.TorusGeometry(0.025, 0.008, 6, 10),
+      metalMat
+    );
+    weaponTriggerMesh.rotation.x = Math.PI / 2;
+    weaponTriggerMesh.position.set(0, -0.07, 0.18);
+    weaponTriggerMesh.castShadow = false;
+    weaponGroup.add(weaponTriggerMesh);
+
+    // 拉机柄（小柱，右侧凸出） - v2 新增
+    const weaponChargingHandle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.008, 0.008, 0.08, 6),
+      metalMat
+    );
+    weaponChargingHandle.rotation.z = Math.PI / 2;
+    weaponChargingHandle.position.set(0.05, 0.04, 0.05);
+    weaponChargingHandle.castShadow = false;
+    weaponGroup.add(weaponChargingHandle);
+
+    // ---- 左腿组（左髋关节）----
+    const leftLegGroup = new THREE.Group();
+    leftLegGroup.position.set(-0.16, -0.15, 0);
+    hipGroup.add(leftLegGroup);
+    this.leftLegGroup = leftLegGroup;
+
+    // 左大腿（胶囊，8x12 提升精度）
+    const leftThighMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.12, 0.30, 8, 12),
+      bodyMat
+    );
+    leftThighMesh.position.y = -0.20;
+    leftThighMesh.castShadow = false;
+    leftLegGroup.add(leftThighMesh);
+
+    // 左大腿侧袋（战术口袋） - v2 新增
+    const leftThighPocketMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.10, 0.18, 0.06),
+      gearMat
+    );
+    leftThighPocketMesh.position.set(-0.06, -0.18, 0.07);
+    leftThighPocketMesh.rotation.z = 0.1;
+    leftThighPocketMesh.castShadow = false;
+    leftLegGroup.add(leftThighPocketMesh);
+
+    // 左膝关节组（重命名：leftShinGroup → leftKneeGroup）
+    // 保留 this.leftShinGroup 作为兼容别名，避免破坏既有动画代码
+    const leftKneeGroup = new THREE.Group();
+    leftKneeGroup.position.y = -0.40;
+    leftLegGroup.add(leftKneeGroup);
+    this.leftKneeGroup = leftKneeGroup;
+    this.leftShinGroup = leftKneeGroup;  // 兼容别名
+
+    // 左膝盖护甲（半球，凸向前） - v2 新增
+    const leftKneePadMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2),
+      gearMat
+    );
+    leftKneePadMesh.position.set(0, 0, 0.05);
+    leftKneePadMesh.rotation.x = Math.PI / 2;
+    leftKneePadMesh.castShadow = false;
+    leftKneeGroup.add(leftKneePadMesh);
+
+    // 左小腿（胶囊）
+    const leftShinMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.10, 0.25, 8, 12),
+      bodyMat
+    );
+    leftShinMesh.position.y = -0.18;
+    leftShinMesh.castShadow = false;
+    leftKneeGroup.add(leftShinMesh);
+
+    // 左小腿侧袋（小腿战术口袋） - v2 新增
+    const leftShinPocketMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.12, 0.05),
+      gearMat
+    );
+    leftShinPocketMesh.position.set(-0.05, -0.18, 0.06);
+    leftShinPocketMesh.castShadow = false;
+    leftKneeGroup.add(leftShinPocketMesh);
+
+    // 左脚踝关节组 - v2 新增（落地时脚部独立弯曲）
+    const leftAnkleGroup = new THREE.Group();
+    leftAnkleGroup.position.y = -0.36;
+    leftKneeGroup.add(leftAnkleGroup);
+    this.leftAnkleGroup = leftAnkleGroup;
+
+    // 左靴（盒子，含鞋头凸起）
+    const leftBoot = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 0.10, 0.28),
+      bootMat
+    );
+    leftBoot.position.set(0, -0.04, 0.06);
+    leftBoot.castShadow = false;
+    leftAnkleGroup.add(leftBoot);
+    // 左鞋头（前突小盒，增加鞋型轮廓） - v2 新增
+    const leftBootToe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.13, 0.06, 0.06),
+      bootMat
+    );
+    leftBootToe.position.set(0, -0.06, 0.20);
+    leftBootToe.castShadow = false;
+    leftAnkleGroup.add(leftBootToe);
+    // 左鞋底（薄黑色盒，强化视觉层次） - v2 新增
+    const leftBootSole = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 0.02, 0.28),
+      new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 0.6, metalness: 0.0 })
+    );
+    leftBootSole.position.set(0, -0.10, 0.06);
+    leftBootSole.castShadow = false;
+    leftAnkleGroup.add(leftBootSole);
+
+    // ---- 右腿组（右髋关节）----
+    const rightLegGroup = new THREE.Group();
+    rightLegGroup.position.set(0.16, -0.15, 0);
+    hipGroup.add(rightLegGroup);
+    this.rightLegGroup = rightLegGroup;
+
+    // 右大腿
+    const rightThighMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.12, 0.30, 8, 12),
+      bodyMat
+    );
+    rightThighMesh.position.y = -0.20;
+    rightThighMesh.castShadow = false;
+    rightLegGroup.add(rightThighMesh);
+
+    // 右大腿侧袋 - v2 新增
+    const rightThighPocketMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.10, 0.18, 0.06),
+      gearMat
+    );
+    rightThighPocketMesh.position.set(0.06, -0.18, 0.07);
+    rightThighPocketMesh.rotation.z = -0.1;
+    rightThighPocketMesh.castShadow = false;
+    rightLegGroup.add(rightThighPocketMesh);
+
+    // 右膝关节组 - v2 重命名
+    const rightKneeGroup = new THREE.Group();
+    rightKneeGroup.position.y = -0.40;
+    rightLegGroup.add(rightKneeGroup);
+    this.rightKneeGroup = rightKneeGroup;
+    this.rightShinGroup = rightKneeGroup;  // 兼容别名
+
+    // 右膝盖护甲 - v2 新增
+    const rightKneePadMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2),
+      gearMat
+    );
+    rightKneePadMesh.position.set(0, 0, 0.05);
+    rightKneePadMesh.rotation.x = Math.PI / 2;
+    rightKneePadMesh.castShadow = false;
+    rightKneeGroup.add(rightKneePadMesh);
+
+    // 右小腿
+    const rightShinMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.10, 0.25, 8, 12),
+      bodyMat
+    );
+    rightShinMesh.position.y = -0.18;
+    rightShinMesh.castShadow = false;
+    rightKneeGroup.add(rightShinMesh);
+
+    // 右小腿侧袋 - v2 新增
+    const rightShinPocketMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.12, 0.05),
+      gearMat
+    );
+    rightShinPocketMesh.position.set(0.05, -0.18, 0.06);
+    rightShinPocketMesh.castShadow = false;
+    rightKneeGroup.add(rightShinPocketMesh);
+
+    // 右脚踝关节组 - v2 新增
+    const rightAnkleGroup = new THREE.Group();
+    rightAnkleGroup.position.y = -0.36;
+    rightKneeGroup.add(rightAnkleGroup);
+    this.rightAnkleGroup = rightAnkleGroup;
+
+    // 右靴
+    const rightBoot = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 0.10, 0.28),
+      bootMat
+    );
+    rightBoot.position.set(0, -0.04, 0.06);
+    rightBoot.castShadow = false;
+    rightAnkleGroup.add(rightBoot);
+    // 右鞋头 - v2 新增
+    const rightBootToe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.13, 0.06, 0.06),
+      bootMat
+    );
+    rightBootToe.position.set(0, -0.06, 0.20);
+    rightBootToe.castShadow = false;
+    rightAnkleGroup.add(rightBootToe);
+    // 右鞋底 - v2 新增
+    const rightBootSole = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 0.02, 0.28),
+      new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 0.6, metalness: 0.0 })
+    );
+    rightBootSole.position.set(0, -0.10, 0.06);
+    rightBootSole.castShadow = false;
+    rightAnkleGroup.add(rightBootSole);
+
+    // ---- 枪口火焰（默认隐藏）----
+    this._buildMuzzleFlash();
+
+    // 同步初始位置
     this.group.position.copy(this.position);
+  }
+
+  /**
+   * 构建枪口火焰：球 + 点光源，射击时短暂闪现
+   * 默认隐藏，由 _shootAtPlayer 触发，_updateMuzzleFlash 衰减
+   * @private
+   */
+  _buildMuzzleFlash() {
+    const flashGroup = new THREE.Group();
+    // 火焰球（核心）
+    const flashCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.08, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xFFDD66, transparent: true, opacity: 0 })
+    );
+    flashCore.castShadow = false;
+    flashGroup.add(flashCore);
+    // 火焰外层（带发光）
+    const flashOuter = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xFF8800, transparent: true, opacity: 0 })
+    );
+    flashOuter.castShadow = false;
+    flashGroup.add(flashOuter);
+    // 点光源（短暂照亮周围）
+    const flashLight = new THREE.PointLight(0xFFAA44, 0, 4);
+    flashLight.castShadow = false;
+    flashGroup.add(flashLight);
+    // 挂到枪口位置
+    flashGroup.position.set(0, 0.01, -0.65);
+    this.weaponGroup.add(flashGroup);
+    this.muzzleFlash = flashGroup;
+    this.muzzleFlashCore = flashCore;
+    this.muzzleFlashOuter = flashOuter;
+    this.muzzleFlashLight = flashLight;
+    this.muzzleFlashEndTime = 0;
+  }
+
+  /**
+   * 更新枪口火焰：根据当前时间衰减透明度
+   * @param {number} now 当前时间（秒）
+   * @private
+   */
+  _updateMuzzleFlash(now) {
+    if (now < this.muzzleFlashEndTime) {
+      // 闪烁中：根据剩余时间计算透明度（前 30% 最亮，后 70% 快速衰减）
+      const remain = this.muzzleFlashEndTime - now;
+      const total = 0.08;  // 总持续 80ms
+      const t = Math.max(0, remain / total);
+      const opacity = Math.min(1, t * 1.4);
+      this.muzzleFlashCore.material.opacity = opacity;
+      this.muzzleFlashOuter.material.opacity = opacity * 0.6;
+      this.muzzleFlashLight.intensity = opacity * 3.0;
+      // 随机轻微缩放，模拟火焰跳动
+      const s = 0.8 + Math.random() * 0.4;
+      this.muzzleFlash.scale.set(s, s, s);
+    } else {
+      this.muzzleFlashCore.material.opacity = 0;
+      this.muzzleFlashOuter.material.opacity = 0;
+      this.muzzleFlashLight.intensity = 0;
+    }
   }
 
   /**
@@ -257,11 +1022,11 @@ export class EnemyAI {
    */
   update(delta, player, allEnemies) {
     if (!this.isAlive) {
-      // 倒地动画
-      if (this.group.rotation.x < Math.PI / 2 - 0.05) {
-        this.group.rotation.x += delta * 4;
-        this.group.position.y = Math.max(0, this.group.position.y - delta * 0.5);
-      }
+      // 多阶段死亡动画
+      this._updateDeathAnimation(delta);
+      // 枪口火焰继续衰减
+      const nowDeath = performance.now() / 1000;
+      this._updateMuzzleFlash(nowDeath);
       return;
     }
 
@@ -332,6 +1097,326 @@ export class EnemyAI {
 
     // ---- 武器状态更新 ----
     this.weapon.update(now);
+
+    // ---- 人物动画 ----
+    this._updateAnimation(delta, now);
+
+    // ---- 枪口火焰衰减 ----
+    this._updateMuzzleFlash(now);
+  }
+
+  /**
+   * 人物动画系统 v2：根据当前状态驱动各关节动画
+   * --------------------------------------------------------------
+   * 包含：
+   *  - 待机呼吸（胸腔+颈部+头部三层级联动画）
+   *  - 待机调整姿势（每 4-8 秒一次微转头，增加生命感）
+   *  - 行走动画（腿摆动 + 膝盖弯曲 + 脚踝背屈/跖屈 + 肘部弯曲 + 摆臂）
+   *  - 奔跑动画（更大摆幅 + 肘部 90° 弯曲 + 膝盖更深弯曲）
+   *  - 交战持枪姿态（双臂抬起 + 双肘弯曲 + 颈部前倾瞄准）
+   *  - 换弹动画（双手到胸前 + 武器抖动 + 武器下沉）
+   *  - 射击后坐力（右臂上抬 + 右肘加深 + 武器后仰 + 胸腔微震）
+   *  - 受伤反馈（头/颈/胸三层后仰 + 沿攻击方向侧向倾斜）
+   *  - 搜索状态（颈部+头部协同扫描，不同频率）
+   * 改进点（v2）：
+   *  - 新增肘关节动画（前臂独立弯曲，行走/持枪/换弹不同姿态）
+   *  - 新增脚踝关节动画（落地时背屈，抬起时跖屈）
+   *  - 新增颈部独立动画（呼吸/瞄准/搜索时颈部协同）
+   *  - 受伤方向反馈：根据攻击者相对方向侧向倾斜
+   *  - 待机微动作：每 4-8 秒一次随机转头
+   * @param {number} delta 帧间隔（秒）
+   * @param {number} now 当前时间（秒）
+   * @private
+   */
+  _updateAnimation(delta, now) {
+    // ---- 计算水平速度（用于判定静止/行走/奔跑）----
+    const speed = Math.sqrt(this.velocity.x * this.velocity.x + this.velocity.z * this.velocity.z);
+    this._lastSpeed = THREE.MathUtils.lerp(this._lastSpeed, speed, 0.2);
+
+    // ---- 待机呼吸：胸腔 + 颈部 + 头部三层级联 ----
+    // 呼吸频率：1.5 秒一次（随性格略有差异）
+    const breathFreq = 1.5 + (this._personality - 0.5) * 0.4;
+    const breath = Math.sin(now * breathFreq * Math.PI) * 0.012;
+    this.chestGroup.position.y = 0.35 + breath;
+    // 颈部随呼吸轻微转动（v2 新增）
+    this.neckGroup.rotation.x = breath * 0.15;
+    this.neckGroup.rotation.z = breath * 0.05;
+
+    // ---- 待机调整姿势（v2 新增）：每 4-8 秒一次微转头，增加生命感 ----
+    if (this._lastSpeed < 0.5 && this.state !== 'engage' && this.state !== 'investigate') {
+      if (now > this._nextIdleAdjust && this._idleAdjustRemain <= 0) {
+        this._nextIdleAdjust = now + 4 + Math.random() * 4;
+        this._idleAdjustRemain = 1.2 + Math.random() * 0.8;
+        this._idleAdjustTarget = (Math.random() - 0.5) * 0.6;
+      }
+      if (this._idleAdjustRemain > 0) {
+        this._idleAdjustRemain -= delta;
+        // 平滑过渡到目标角度
+        this.headGroup.rotation.y = THREE.MathUtils.lerp(
+          this.headGroup.rotation.y, this._idleAdjustTarget, 0.05
+        );
+      }
+    } else {
+      this._idleAdjustRemain = 0;
+      this._nextIdleAdjust = now + 4;
+    }
+
+    // ---- 行走/奔跑动画 ----
+    if (this._lastSpeed > 0.5) {
+      // 步频：速度越快频率越高
+      const stepFreq = 1.5 + Math.min(this._lastSpeed, 5.0) * 0.5;
+      this._walkPhase += delta * stepFreq * Math.PI;
+
+      const isRunning = this._lastSpeed > 4.0 && this.state !== 'engage';
+      const swingAmp = isRunning ? 0.55 : 0.35;
+      const bodyBounce = isRunning ? 0.06 : 0.03;
+
+      const swing = Math.sin(this._walkPhase) * swingAmp;
+      const swingOpp = Math.sin(this._walkPhase + Math.PI) * swingAmp;
+
+      // 腿摆动（髋关节）
+      this.leftLegGroup.rotation.x = swing;
+      this.rightLegGroup.rotation.x = swingOpp;
+      // 膝关节弯曲（行走时小腿轻微弯曲，奔跑时更明显）
+      const kneeBend = Math.max(0, Math.sin(this._walkPhase + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
+      const kneeBendOpp = Math.max(0, Math.sin(this._walkPhase + Math.PI + Math.PI / 2)) * (isRunning ? 0.6 : 0.25);
+      this.leftKneeGroup.rotation.x = kneeBend;
+      this.rightKneeGroup.rotation.x = kneeBendOpp;
+
+      // 脚踝关节弯曲（v2 新增）：腿前摆时脚尖上抬（背屈），腿后摆时脚尖下垂（跖屈）
+      const ankleBendL = Math.sin(this._walkPhase + Math.PI / 4) * 0.3;
+      const ankleBendR = Math.sin(this._walkPhase + Math.PI + Math.PI / 4) * 0.3;
+      this.leftAnkleGroup.rotation.x = ankleBendL;
+      this.rightAnkleGroup.rotation.x = ankleBendR;
+
+      // 手臂反向摆动 + 肘部弯曲（v2 新增）
+      if (this.state !== 'engage' && this.state !== 'reload' && this.state !== 'retreat') {
+        this.leftArmGroup.rotation.x = swingOpp * 0.6;
+        this.rightArmGroup.rotation.x = swing * 0.6;
+        // 肘部基础弯曲：行走 30°，奔跑 80°（自然姿态）
+        const elbowBase = isRunning ? 1.4 : 0.5;
+        // 摆臂时肘部弯曲度跟随摆动相位变化（前摆时更弯）
+        const elbowVarL = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
+        const elbowVarR = Math.max(0, Math.sin(this._walkPhase + Math.PI / 3)) * 0.3;
+        this.leftElbowGroup.rotation.x = elbowBase + elbowVarL;
+        this.rightElbowGroup.rotation.x = elbowBase + elbowVarR;
+      }
+
+      // 身体上下起伏 + 左右轻微摇晃
+      const bounce = Math.abs(Math.sin(this._walkPhase * 2)) * bodyBounce;
+      this.hipGroup.position.y = 0.95 + bounce;
+      this.hipGroup.rotation.z = Math.sin(this._walkPhase) * 0.02;
+    } else {
+      // 静止：所有关节缓慢回归原位
+      this.leftLegGroup.rotation.x = THREE.MathUtils.lerp(this.leftLegGroup.rotation.x, 0, 0.15);
+      this.rightLegGroup.rotation.x = THREE.MathUtils.lerp(this.rightLegGroup.rotation.x, 0, 0.15);
+      this.leftKneeGroup.rotation.x = THREE.MathUtils.lerp(this.leftKneeGroup.rotation.x, 0, 0.15);
+      this.rightKneeGroup.rotation.x = THREE.MathUtils.lerp(this.rightKneeGroup.rotation.x, 0, 0.15);
+      // 脚踝归位（v2 新增）
+      this.leftAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.leftAnkleGroup.rotation.x, 0, 0.15);
+      this.rightAnkleGroup.rotation.x = THREE.MathUtils.lerp(this.rightAnkleGroup.rotation.x, 0, 0.15);
+      if (this.state !== 'engage' && this.state !== 'reload' && this.state !== 'retreat') {
+        this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, 0, 0.15);
+        this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, 0, 0.15);
+        // 肘部归位到轻微弯曲 0.2（自然下垂姿态，v2 新增）
+        this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, 0.2, 0.15);
+        this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, 0.2, 0.15);
+      }
+      this.hipGroup.position.y = THREE.MathUtils.lerp(this.hipGroup.position.y, 0.95, 0.2);
+      this.hipGroup.rotation.z = THREE.MathUtils.lerp(this.hipGroup.rotation.z, 0, 0.15);
+    }
+
+    // ---- 交战姿态：双手持枪 + 双肘弯曲 + 颈部前倾瞄准 ----
+    if (this.state === 'engage') {
+      // 左臂抬起扶枪（向前伸）
+      this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, -1.1, 0.2);
+      this.leftArmGroup.rotation.z = THREE.MathUtils.lerp(this.leftArmGroup.rotation.z, 0.3, 0.2);
+      // 左肘弯曲：前臂指向枪身（v2 新增）
+      this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, -1.2, 0.2);
+      // 右臂自然下垂持枪
+      this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, -0.3, 0.2);
+      // 右肘弯曲：前臂指向握把（v2 新增）
+      this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, -0.6, 0.2);
+      // 颈部微前倾（瞄准姿态，v2 新增）
+      this.neckGroup.rotation.x = THREE.MathUtils.lerp(this.neckGroup.rotation.x, -0.08, 0.1);
+      this.headGroup.rotation.x = THREE.MathUtils.lerp(this.headGroup.rotation.x, 0, 0.1);
+    } else if (this.state === 'reload' || this.state === 'retreat') {
+      // 换弹/撤退：双手下沉到胸前
+      this.leftArmGroup.rotation.x = THREE.MathUtils.lerp(this.leftArmGroup.rotation.x, -0.5, 0.15);
+      this.rightArmGroup.rotation.x = THREE.MathUtils.lerp(this.rightArmGroup.rotation.x, -0.5, 0.15);
+      // 肘部弯曲加深（双手到胸前，v2 新增）
+      this.leftElbowGroup.rotation.x = THREE.MathUtils.lerp(this.leftElbowGroup.rotation.x, -1.5, 0.15);
+      this.rightElbowGroup.rotation.x = THREE.MathUtils.lerp(this.rightElbowGroup.rotation.x, -1.5, 0.15);
+      // 换弹时武器抖动 + 下沉（模拟换弹匣操作）
+      if (this.state === 'reload' && this.weapon.isReloading) {
+        const reloadShake = Math.sin(now * 25) * 0.08;
+        this.rightArmGroup.rotation.z = reloadShake;
+        this.weaponGroup.rotation.z = reloadShake * 0.5;
+        // 武器下沉（手放下换弹匣，v2 新增）
+        this.weaponGroup.position.y = THREE.MathUtils.lerp(this.weaponGroup.position.y, -0.36, 0.15);
+      } else {
+        this.rightArmGroup.rotation.z = THREE.MathUtils.lerp(this.rightArmGroup.rotation.z, 0, 0.15);
+        this.weaponGroup.rotation.z = THREE.MathUtils.lerp(this.weaponGroup.rotation.z, 0, 0.15);
+        this.weaponGroup.position.y = THREE.MathUtils.lerp(this.weaponGroup.position.y, -0.30, 0.15);
+      }
+      // 颈部回归
+      this.neckGroup.rotation.x = THREE.MathUtils.lerp(this.neckGroup.rotation.x, 0, 0.1);
+    } else {
+      // 巡逻/搜索/待机：手臂自然下垂
+      this.leftArmGroup.rotation.z = THREE.MathUtils.lerp(this.leftArmGroup.rotation.z, 0, 0.1);
+      this.rightArmGroup.rotation.z = THREE.MathUtils.lerp(this.rightArmGroup.rotation.z, 0, 0.1);
+      this.weaponGroup.rotation.z = THREE.MathUtils.lerp(this.weaponGroup.rotation.z, 0, 0.1);
+      this.weaponGroup.position.y = THREE.MathUtils.lerp(this.weaponGroup.position.y, -0.30, 0.1);
+      this.neckGroup.rotation.x = THREE.MathUtils.lerp(this.neckGroup.rotation.x, 0, 0.1);
+    }
+
+    // ---- 射击后坐力动画：右臂上抬 + 右肘加深 + 武器后仰 ----
+    // 衰减：0.15 秒内从峰值衰减到 0
+    const recoilElapsed = now - this._lastShootAnimTime;
+    if (recoilElapsed < 0.15) {
+      const recoilT = Math.max(0, 1 - recoilElapsed / 0.15);
+      const recoil = Math.sin(recoilT * Math.PI) * 0.35;
+      // 右臂上抬
+      this.rightArmGroup.rotation.x -= recoil * 0.5;
+      // 右肘弯曲加深（被后坐力带起，v2 新增）
+      this.rightElbowGroup.rotation.x -= recoil * 0.3;
+      // 武器后仰
+      this.weaponGroup.rotation.x = -recoil * 0.4;
+      // 胸腔微震
+      this.chestGroup.rotation.x = -recoil * 0.05;
+    } else {
+      this.weaponGroup.rotation.x = THREE.MathUtils.lerp(this.weaponGroup.rotation.x, 0, 0.2);
+      this.chestGroup.rotation.x = THREE.MathUtils.lerp(this.chestGroup.rotation.x, 0, 0.2);
+    }
+
+    // ---- 受伤反馈：头部+颈部+胸腔三层后仰 + 侧向倾斜（v2 强化）----
+    if (now < this._hurtAnimEndTime) {
+      const hurtRemain = this._hurtAnimEndTime - now;
+      const hurtT = hurtRemain / 0.3;  // 总持续 300ms
+      const hurt = Math.sin(hurtT * Math.PI) * 0.25;
+      this.headGroup.rotation.x = -hurt;
+      this.neckGroup.rotation.x -= hurt * 0.4;
+      this.chestGroup.rotation.x -= hurt * 0.3;
+      // 侧向倾斜：根据攻击者方向（v2 新增）
+      // _hurtDir 是攻击者相对 AI 朝向的方向角（0=正前，π/2=正右）
+      // 受伤时向攻击方向倾斜（被冲击力推动感）
+      const sideTilt = Math.sin(this._hurtDir) * hurt * 0.4;
+      this.chestGroup.rotation.z = sideTilt;
+      this.hipGroup.rotation.z = sideTilt * 0.3;
+    } else {
+      this.chestGroup.rotation.z = THREE.MathUtils.lerp(this.chestGroup.rotation.z, 0, 0.15);
+    }
+
+    // ---- 搜索状态：颈部+头部协同扫描（v2 强化，不同频率增加自然感）----
+    if (this.state === 'investigate') {
+      // 颈部小幅度扫描（主扫描由 group.rotation.y 完成）
+      const scanNeck = Math.sin(now * 1.2) * 0.15;
+      // 头部更大幅度扫描，频率略快于颈部
+      const scanHead = Math.sin(now * 1.5) * 0.25;
+      this.neckGroup.rotation.y = scanNeck;
+      this.headGroup.rotation.y = scanHead;
+    } else {
+      this.neckGroup.rotation.y = THREE.MathUtils.lerp(this.neckGroup.rotation.y, 0, 0.15);
+      // 头部 Y 归零（待机调整时由上方逻辑处理）
+      if (this._idleAdjustRemain <= 0) {
+        this.headGroup.rotation.y = THREE.MathUtils.lerp(this.headGroup.rotation.y, 0, 0.15);
+      }
+    }
+  }
+
+  /**
+   * 多阶段死亡动画 v2：头后仰 → 跪倒 → 倒地（带缓动 + 随机倒向）
+   * --------------------------------------------------------------
+   * 阶段1 (0-0.3s)：头部剧烈后仰 + 胸腔后仰 + 双臂张开（失去控制）
+   * 阶段2 (0.3-0.7s)：双腿弯曲跪倒（hipGroup 下降）+ 手臂垂下
+   * 阶段3 (0.7-1.2s)：整体倒地（前倒/左倒/右倒，由 _deathFallDir 决定）
+   * 改进点（v2）：
+   *  - 使用 easeOutCubic 缓动函数（1-(1-t)^3）替代线性插值
+   *  - 倒地方向随机：前倒（rotation.x）、左倒（rotation.z = +π/2）、右倒（rotation.z = -π/2）
+   *  - 阶段3 加入肘关节自然弯曲（前臂垂落）
+   *  - 头部最终归位时考虑倒地方向，让头朝向自然
+   * @param {number} delta
+   * @private
+   */
+  _updateDeathAnimation(delta) {
+    // 使用 delta 累积时间（修复：避免低帧率时 performance.now() 跳过中间阶段）
+    if (this._deathStage === 0) {
+      // 死亡瞬间触发：记录开始时间
+      this._deathElapsed = 0;
+      this._deathStage = 1;
+    }
+    this._deathElapsed += delta;
+    const elapsed = this._deathElapsed;
+
+    // easeOutCubic 缓动函数：开始快，结束慢，模拟物理减速
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+    // 阶段1：头后仰 + 双臂张开（0-0.3s）
+    if (elapsed < 0.3) {
+      const t1 = easeOutCubic(elapsed / 0.3);
+      this.headGroup.rotation.x = -t1 * 0.6;
+      this.neckGroup.rotation.x = -t1 * 0.3;
+      this.chestGroup.rotation.x = -t1 * 0.3;
+      // 双臂张开（失去控制）
+      this.leftArmGroup.rotation.z = t1 * 0.8;
+      this.rightArmGroup.rotation.z = -t1 * 0.8;
+      // 双肘轻微弯曲（松弛感）
+      this.leftElbowGroup.rotation.x = t1 * 0.3;
+      this.rightElbowGroup.rotation.x = t1 * 0.3;
+    }
+    // 阶段2：跪倒（0.3-0.7s）
+    else if (elapsed < 0.7) {
+      const t2 = easeOutCubic((elapsed - 0.3) / 0.4);
+      // 头部回归（前倾，准备倒地）
+      this.headGroup.rotation.x = -0.6 + t2 * 0.3;
+      this.neckGroup.rotation.x = -0.3 + t2 * 0.2;
+      this.chestGroup.rotation.x = -0.3 + t2 * 0.2;
+      // 膝盖弯曲（跪下）
+      this.leftLegGroup.rotation.x = -t2 * 1.2;
+      this.rightLegGroup.rotation.x = -t2 * 1.2;
+      this.leftKneeGroup.rotation.x = t2 * 1.5;
+      this.rightKneeGroup.rotation.x = t2 * 1.5;
+      // 脚踝自然弯曲（跪姿时脚尖着地）
+      this.leftAnkleGroup.rotation.x = t2 * 0.5;
+      this.rightAnkleGroup.rotation.x = t2 * 0.5;
+      // hipGroup 下降
+      this.hipGroup.position.y = 0.95 - t2 * 0.5;
+      // 手臂垂下
+      this.leftArmGroup.rotation.z = 0.8 - t2 * 0.5;
+      this.rightArmGroup.rotation.z = -0.8 + t2 * 0.5;
+      // 肘关节进一步弯曲（手臂自然垂落）
+      this.leftElbowGroup.rotation.x = 0.3 + t2 * 0.8;
+      this.rightElbowGroup.rotation.x = 0.3 + t2 * 0.8;
+    }
+    // 阶段3：倒地（0.7-1.2s）
+    else if (elapsed < 1.2) {
+      const t3 = easeOutCubic((elapsed - 0.7) / 0.5);
+      // 根据倒地方向应用不同的旋转
+      if (this._deathFallDir === 0) {
+        // 前倒：rotation.x → π/2
+        this.group.rotation.x = t3 * (Math.PI / 2 - 0.1);
+        this.group.rotation.z = 0;
+      } else {
+        // 侧倒：rotation.z → ±π/2
+        this.group.rotation.x = t3 * 0.2;  // 轻微前倾
+        this.group.rotation.z = this._deathFallDir * t3 * (Math.PI / 2 - 0.1);
+      }
+      this.group.position.y = Math.max(0, 0.4 - t3 * 0.4);
+      // 头部最终归位
+      this.headGroup.rotation.x = -0.3 + t3 * 0.3;
+      this.neckGroup.rotation.x = -0.1 + t3 * 0.1;
+    }
+    // 完成：保持倒地姿态
+    else {
+      if (this._deathFallDir === 0) {
+        this.group.rotation.x = Math.PI / 2 - 0.1;
+        this.group.rotation.z = 0;
+      } else {
+        this.group.rotation.x = 0.2;
+        this.group.rotation.z = this._deathFallDir * (Math.PI / 2 - 0.1);
+      }
+      this.group.position.y = 0;
+    }
   }
 
   /**
@@ -819,6 +1904,12 @@ export class EnemyAI {
     this.audio.gunshot(this.weapon.id);
     if (this.onShoot) this.onShoot(this);
 
+    // ---- 触发射击动画：枪口火焰 + 后坐力 ----
+    this._lastShootAnimTime = now;
+    this.muzzleFlashEndTime = now + 0.08;
+    // 随机旋转枪口火焰，让每次闪烁形态不同
+    this.muzzleFlash.rotation.z = Math.random() * Math.PI * 2;
+
     // ---- 计算散布 ----
     // AI 散布倍率：步枪 2.5x，冲锋枪 2.0x，狙击枪 4.0x，手枪 2.0x
     // 这样 AI 在远距离下命中率会显著降低，玩家有躲避机会
@@ -955,6 +2046,22 @@ export class EnemyAI {
     this.health -= damage;
     this.damage += damage;
 
+    // ---- 触发受伤动画：头部/胸腔后仰 300ms ----
+    this._hurtAnimEndTime = performance.now() / 1000 + 0.3;
+
+    // ---- 记录受伤方向（v2 新增）：用于侧向倾斜反馈 ----
+    // 计算攻击者相对 AI 朝向的方向角（0=正前，π/2=正右，π=正后）
+    if (attacker && attacker.position) {
+      const dx = attacker.position.x - this.position.x;
+      const dz = attacker.position.z - this.position.z;
+      // AI 朝向：(sin(yaw), 0, cos(yaw))，正向角度=atan2(dx, dz) - yaw
+      const worldAngle = Math.atan2(dx, dz);
+      this._hurtDir = worldAngle - this.yaw;
+      // 归一化到 [-π, π]
+      while (this._hurtDir > Math.PI) this._hurtDir -= Math.PI * 2;
+      while (this._hurtDir < -Math.PI) this._hurtDir += Math.PI * 2;
+    }
+
     // 被打就锁定目标
     if (attacker && attacker.position) {
       this.target = attacker;
@@ -985,6 +2092,13 @@ export class EnemyAI {
       this.health = 0;
       this.isAlive = false;
       this.deaths++;
+      // 触发死亡动画（_deathStage=0 表示需要初始化）
+      this._deathStage = 0;
+      // 随机倒地方向（v2 新增）：前倒/左倒/右倒，让每次死亡姿态不同
+      const r = Math.random();
+      if (r < 0.4) this._deathFallDir = 0;       // 40% 前倒
+      else if (r < 0.7) this._deathFallDir = -1; // 30% 左倒
+      else this._deathFallDir = 1;                // 30% 右倒
       if (this.onDeath) this.onDeath(this, attacker);
       return true;
     }
@@ -1053,6 +2167,55 @@ export class EnemyAI {
     this._avoidSteer = 0;
     this._retreatCooldownUntil = 0;
     this._retreatArriveTime = -1;
+
+    // ---- 重置动画状态 ----
+    this._walkPhase = 0;
+    this._lastShootAnimTime = -10;
+    this._hurtAnimEndTime = 0;
+    this._hurtDir = 0;            // v2 新增
+    this._deathStage = 0;
+    this._deathElapsed = 0;
+    this._deathFallDir = 0;       // v2 新增
+    this._lastSpeed = 0;
+    this.muzzleFlashEndTime = 0;
+    this._nextIdleAdjust = 0;     // v2 新增
+    this._idleAdjustRemain = 0;   // v2 新增
+    this._idleAdjustTarget = 0;   // v2 新增
+
+    // ---- 复位所有关节变换（避免重生后残留死亡姿态）----
+    if (this.group) {
+      this.group.rotation.set(0, 0, 0);
+      this.group.position.copy(this.position);
+    }
+    if (this.hipGroup) {
+      this.hipGroup.position.set(0, 0.95, 0);
+      this.hipGroup.rotation.set(0, 0, 0);
+    }
+    if (this.chestGroup) {
+      this.chestGroup.position.set(0, 0.35, 0);
+      this.chestGroup.rotation.set(0, 0, 0);
+    }
+    // v2 新增：颈部关节复位
+    if (this.neckGroup) this.neckGroup.rotation.set(0, 0, 0);
+    if (this.headGroup) this.headGroup.rotation.set(0, 0, 0);
+    if (this.leftArmGroup) this.leftArmGroup.rotation.set(0, 0, 0);
+    if (this.rightArmGroup) this.rightArmGroup.rotation.set(0, 0, 0);
+    // v2 新增：肘关节复位
+    if (this.leftElbowGroup) this.leftElbowGroup.rotation.set(0, 0, 0);
+    if (this.rightElbowGroup) this.rightElbowGroup.rotation.set(0, 0, 0);
+    // 武器组复位（含 position.y，v2 新增，避免换弹动画残留位置）
+    if (this.weaponGroup) {
+      this.weaponGroup.rotation.set(0, 0, 0);
+      this.weaponGroup.position.set(0, -0.30, -0.10);
+    }
+    if (this.leftLegGroup) this.leftLegGroup.rotation.set(0, 0, 0);
+    if (this.rightLegGroup) this.rightLegGroup.rotation.set(0, 0, 0);
+    // 膝关节（兼容旧名称 leftShinGroup）复位
+    if (this.leftKneeGroup) this.leftKneeGroup.rotation.set(0, 0, 0);
+    if (this.rightKneeGroup) this.rightKneeGroup.rotation.set(0, 0, 0);
+    // v2 新增：脚踝关节复位
+    if (this.leftAnkleGroup) this.leftAnkleGroup.rotation.set(0, 0, 0);
+    if (this.rightAnkleGroup) this.rightAnkleGroup.rotation.set(0, 0, 0);
   }
 
   /**
